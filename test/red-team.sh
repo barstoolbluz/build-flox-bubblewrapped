@@ -97,6 +97,38 @@ export AWS_ACCESS_KEY_ID="canary-aws-key-MUST-NOT-LEAK"
 export GITHUB_TOKEN="canary-github-token-MUST-NOT-LEAK"
 export ANTHROPIC_API_KEY="sk-canary-anthropic-value"
 
+# Pre-check: can the harness itself resolve example.com?  Used to gate
+# the positive DNS tests (which depend on real network) so we don't
+# blame the jail for a captive portal, dead hotel wifi, or air-gapped
+# CI runner.  If the host can't resolve at all, the jail won't either,
+# so skip rather than fail.  Negative DNS tests (--no-net, default run
+# mode) are unaffected — they fail fast on --unshare-net regardless.
+#
+# `timeout 3` caps the wait: getent respects its own per-nameserver
+# timeout (up to ~15s on a dead resolver), which is way too long for
+# a pre-check.
+if timeout 3 getent ahosts example.com >/dev/null 2>&1; then
+  HOST_DNS_WORKS=1
+else
+  HOST_DNS_WORKS=0
+  echo "[harness pre-check] cannot resolve example.com; positive DNS tests will skip"
+fi
+
+# Retry a positive-DNS test inside the jail up to 3 times with short
+# backoff, to mask transient packet loss without masking real bugs.
+# Usage:
+#   _jail_dns_retry "$JAIL" run --net
+#   _jail_dns_retry "$JAIL" agent
+_jail_dns_retry() {
+  local jail=$1; shift
+  local attempt
+  for attempt in 1 2 3; do
+    "$jail" "$@" -- timeout 3 getent ahosts example.com >/dev/null 2>&1 && return 0
+    sleep 0.3
+  done
+  return 1
+}
+
 echo "=== bubblewrap-jail red-team test suite ==="
 echo "target: $JAIL"
 echo
@@ -117,7 +149,11 @@ expect_pass "run: /tmp writable"                -- "$JAIL" run -- touch /tmp/run
 echo
 echo "[run mode / network]"
 expect_fail "run: default DNS fails"            -- "$JAIL" run -- timeout 3 getent ahosts example.com
-expect_pass "run: --net DNS works"              -- "$JAIL" run --net -- timeout 5 getent ahosts example.com
+if [ "$HOST_DNS_WORKS" = 1 ]; then
+  expect_pass "run: --net DNS works" -- _jail_dns_retry "$JAIL" run --net
+else
+  echo "  skip: run: --net DNS works (host DNS unavailable)"
+fi
 
 echo
 echo "[run mode / privilege escape]"
@@ -147,7 +183,11 @@ expect_fail "agent: /etc not writable"          -- "$JAIL" agent -- touch /etc/f
 
 echo
 echo "[agent mode / network]"
-expect_pass "agent: default DNS works"          -- "$JAIL" agent -- timeout 5 getent ahosts example.com
+if [ "$HOST_DNS_WORKS" = 1 ]; then
+  expect_pass "agent: default DNS works" -- _jail_dns_retry "$JAIL" agent
+else
+  echo "  skip: agent: default DNS works (host DNS unavailable)"
+fi
 expect_fail "agent: --no-net DNS blocked"       -- "$JAIL" agent --no-net -- timeout 3 getent ahosts example.com
 
 echo
