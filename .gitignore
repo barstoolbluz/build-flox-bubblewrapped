@@ -1,0 +1,3 @@
+# Flox build outputs — symlinks into /nix/store.  Not source.
+/result-*
+*.prevOutPath

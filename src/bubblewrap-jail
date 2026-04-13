@@ -38,7 +38,6 @@ die() { err "$*"; exit 1; }
 usage() {
   # Use printf (a bash builtin) rather than cat so --help works even when
   # PATH is empty / bwrap and coreutils are unavailable.
-  local IFS=''
   printf '%s\n' "\
 Usage: $prog <subcommand> [options] -- CMD [ARGS...]
 
@@ -192,12 +191,24 @@ run_check() {
     fail_msg "/nix/store absent (non-Nix host)" "many flox-packaged tools won't resolve"
   fi
 
-  # Seccomp BPF blob shipped with this installation?
+  # Seccomp BPF blob shipped with this installation?  Two checks: (1) the
+  # file is readable, (2) bwrap will actually accept it via --seccomp.  The
+  # second catches a corrupted/truncated blob or a kernel that rejects the
+  # filter at prctl(PR_SET_SECCOMP) time.
   case "$BPF_PATH" in
     /*)
       if [ -r "$BPF_PATH" ]; then
         bsz=$(wc -c <"$BPF_PATH" 2>/dev/null || echo 0)
         pass_msg "seccomp BPF readable ($bsz bytes at $BPF_PATH)"
+        if bwrap --ro-bind / / --disable-userns --assert-userns-disabled \
+                 --unshare-user --unshare-pid --die-with-parent \
+                 --seccomp 11 11<"$BPF_PATH" \
+                 true 2>/dev/null
+        then
+          pass_msg "seccomp BPF loads into bwrap"
+        else
+          fail_msg "seccomp BPF present but bwrap rejected it"
+        fi
       else
         fail_msg "seccomp BPF not readable at $BPF_PATH"
       fi
