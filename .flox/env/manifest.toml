@@ -12,7 +12,7 @@ gcc.pkg-path = "gcc"
 perl.pkg-path = "perl"
 
 [build.bubblewrap-jail]
-version = "0.3.3"
+version = "0.3.4"
 description = "Opinionated bubblewrap wrapper: run/agent subcommands, secure-by-default defaults"
 sandbox = "pure"
 runtime-packages = ["bubblewrap"]
@@ -44,6 +44,14 @@ command = '''
   ./gen-seccomp --pfc > tiocsti.pfc
   if [ ! -s tiocsti.pfc ]; then
     echo "gen-seccomp --pfc produced empty output" >&2
+    exit 1
+  fi
+
+  # Sanity check: gen-seccomp should reject too many arguments (A9 guard).
+  # A regression that silently ignores extra args would let typos like
+  # "gen-seccomp --pfc out.pfc" pass without the user noticing.
+  if ./gen-seccomp --pfc extra-arg >/dev/null 2>&1; then
+    echo "gen-seccomp accepts extra arguments (A9 regression)" >&2
     exit 1
   fi
 

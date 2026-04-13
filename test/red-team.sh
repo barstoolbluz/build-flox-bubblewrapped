@@ -360,6 +360,17 @@ expect_fail \
   "run: --project-ro is agent-only" -- \
   "$JAIL" run --project-ro -- true
 
+# A6: --project-ro combined with --project-as.  Verify both the read
+# path (readme.txt visible at the synthetic dst) and the write block
+# (the synthetic dst is not writable).
+expect_stdout_matches \
+  "agent: --project-ro + --project-as reads synthetic-path content" \
+  "^canary-content\$" -- \
+  bash -c "cd \"\$1\" && \"\$2\" agent --project-ro --project-as /ro-workspace -- cat /ro-workspace/readme.txt" _ "$DIR_B" "$JAIL"
+expect_fail \
+  "agent: --project-ro + --project-as not writable at synthetic path" -- \
+  bash -c "cd \"\$1\" && \"\$2\" agent --project-ro --project-as /ro-workspace -- touch /ro-workspace/.ro-write-test" _ "$DIR_B" "$JAIL"
+
 # F2: --bind/--ro-bind essential-dir guard.  Reject destinations that
 # would shadow FHS-essential paths and break the sandbox.  Sub-paths are
 # still allowed (B1's user --bind into /etc/foo still works).
@@ -547,6 +558,30 @@ expect_fail \
 expect_fail \
   "run: --sync-fd rejects empty value" -- \
   "$JAIL" run --sync-fd "" -- true
+
+# A4: --lock-file pre-validates that the host path exists.
+expect_fail \
+  "run: --lock-file nonexistent host path rejected by wrapper" -- \
+  "$JAIL" run --lock-file /nonexistent/lock/path -- true
+expect_stderr_matches \
+  "run: --lock-file nonexistent error mentions 'does not exist'" \
+  "does not exist" -- \
+  "$JAIL" run --lock-file /nonexistent/lock/path -- true
+
+# A3: V1 auto-bind skips when the user has already bound the jail-side
+# path — so a user binding a different source at the lock path wins.
+# Verify by reading the lock file inside the jail: should see the
+# USER-supplied source content, not the host lock-file content.
+expect_stdout_matches \
+  "run: --lock-file respects user --bind at same jail-side path" \
+  "^user-supplied-source\$" -- \
+  bash -c '
+    LOCK="$2/a3-lock"
+    SRC="$2/a3-user-source"
+    echo "lock-file-content"     > "$LOCK"
+    echo "user-supplied-source"  > "$SRC"
+    "$1" run --bind "$SRC" "$LOCK" --lock-file "$LOCK" -- cat "$LOCK"
+  ' _ "$JAIL" "$SMOKE_CACHE"
 
 echo
 echo "[seccomp: failure modes (C2 — clear errors)]"

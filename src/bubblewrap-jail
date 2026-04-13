@@ -385,6 +385,10 @@ while [ "$#" -gt 0 ]; do
                      shift 2 ;;
     --no-seccomp)    seccomp_enabled=0; shift ;;
     --lock-file)     [ "$#" -ge 2 ] || die "--lock-file needs PATH"
+                     # Pre-validate: bwrap will fail with a cryptic
+                     # "Can't find source path" if the file is missing,
+                     # so catch it early with our own message.
+                     [ -e "$2" ] || die "--lock-file path does not exist: $2 (create it first; bwrap will not)"
                      lock_file=$2; shift 2 ;;
     --sync-fd)       [ "$#" -ge 2 ] || die "--sync-fd needs FD"
                      # bwrap requires a non-negative integer file descriptor
@@ -702,8 +706,12 @@ done
 #     to be released to know when the sandbox exits.  bwrap opens PATH
 #     from INSIDE the jail's filesystem view (after namespace setup),
 #     so we auto-bind PATH (rw) at the same path so it's reachable.
-#     The user is responsible for creating the file on the host before
-#     invocation; bwrap will not create it.
+#     IF the user has already bound PATH themselves (via --bind or
+#     --ro-bind with the same jail-side destination), we skip the
+#     auto-bind and just append --lock-file — so the user can supply
+#     the lock file from a different source without our auto-bind
+#     shadowing their intent.  The user is responsible for creating
+#     the file on the host before invocation; bwrap will not create it.
 #
 #   --sync-fd FD: bwrap holds FD open for the lifetime of the sandbox.
 #     When the sandbox exits, the fd closes — so a parent reading the
@@ -711,7 +719,32 @@ done
 #     must already be open in the parent and inherited by the wrapper
 #     (e.g. `bwrap-jail … --sync-fd 9 9>pipe`).
 if [ -n "$lock_file" ]; then
-  args+=(--bind "$lock_file" "$lock_file" --lock-file "$lock_file")
+  # Check whether the user already bound this jail-side path.
+  _lock_user_bound=0
+  i=0
+  while [ $i -lt ${#extra_bind[@]} ]; do
+    if [ "${extra_bind[i+1]}" = "$lock_file" ]; then
+      _lock_user_bound=1
+      break
+    fi
+    i=$((i + 2))
+  done
+  if [ "$_lock_user_bound" = 0 ]; then
+    i=0
+    while [ $i -lt ${#extra_ro_bind[@]} ]; do
+      if [ "${extra_ro_bind[i+1]}" = "$lock_file" ]; then
+        _lock_user_bound=1
+        break
+      fi
+      i=$((i + 2))
+    done
+  fi
+  if [ "$_lock_user_bound" = 0 ]; then
+    args+=(--bind "$lock_file" "$lock_file" --lock-file "$lock_file")
+  else
+    args+=(--lock-file "$lock_file")
+  fi
+  unset _lock_user_bound
 fi
 [ -n "$sync_fd" ] && args+=(--sync-fd "$sync_fd")
 
@@ -757,15 +790,26 @@ if [ "$seccomp_enabled" = "1" ]; then
         die "seccomp BPF not readable: $BPF_PATH (package broken?)"
       fi
       # Pre-flight: ask bwrap to load this exact blob in a throwaway
-      # sandbox before we exec the real one.  fd 11 is local to the
-      # subshell; the real exec below uses fd 10.
-      if ! bwrap --ro-bind / / --disable-userns --assert-userns-disabled \
-                 --unshare-user --unshare-pid --die-with-parent \
-                 --seccomp 11 11<"$BPF_PATH" \
-                 true 2>/dev/null
-      then
-        die "seccomp BPF rejected by bwrap: $BPF_PATH (corrupt blob, kernel mismatch, or libseccomp ABI shift?)"
+      # sandbox before we exec the real one.  fd 11 is local here; the
+      # real exec below uses fd 10.  Capture bwrap's stderr so that if
+      # the probe fails for a reason OTHER than seccomp rejection (e.g.
+      # a kernel that no longer supports --disable-userns), we can
+      # include bwrap's own error in our die message instead of
+      # blaming the BPF blob generically.
+      #
+      # `if ! x=$(cmd)` is the idiom we need here: it bypasses `set -e`
+      # on a failed command substitution (which would otherwise kill
+      # the script silently before we reach the die message), while
+      # still capturing the command's stderr into $x.
+      if ! _seccomp_probe_err=$(
+        bwrap --ro-bind / / --disable-userns --assert-userns-disabled \
+              --unshare-user --unshare-pid --die-with-parent \
+              --seccomp 11 11<"$BPF_PATH" \
+              true 2>&1 >/dev/null
+      ); then
+        die "seccomp BPF rejected by bwrap: $BPF_PATH (${_seccomp_probe_err:-no stderr from bwrap})"
       fi
+      unset _seccomp_probe_err
       # Open on fd 10 and pass to bwrap.  bwrap inherits non-cloexec fds,
       # and bash's `exec N<file` form does not set cloexec by default.
       exec 10<"$BPF_PATH"
