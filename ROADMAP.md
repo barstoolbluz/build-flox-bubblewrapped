@@ -153,9 +153,140 @@ Status legend:
 
 ---
 
-## Execution status
+## Reviewer non-blockers (closed in v0.4.x)
 
-All roadmap items shipped between v0.2.5 and v0.3.2. **Done.**
+After the original 17-item roadmap closed at v0.3.2, the reviewer
+flagged three additional items explicitly as **non-blockers** — not
+shipping blockers, but worth addressing.  All three landed in v0.4.x.
+
+### R1. `[DONE]` Split `check` probes into required vs optional
+
+Reviewer concern: `check` was treating `--lock-file` and `--sync-fd`
+as hard requirements even though they're runtime-optional wrapper
+features.  A host with older bwrap could be reported as red even
+though the core `run` / `agent` modes would still work fine.
+
+Shipped in v0.4.0.  `check` now distinguishes:
+- **22 required** bwrap flags — missing any is a hard FAIL
+- **3 optional** flags (`--lock-file`, `--sync-fd`, `--info-fd`)
+  reported on `OPT` lines that don't affect the exit code
+
+Summary line extended: `=== result: 29 passed, 0 failed; optional:
+3 supported / 0 missing ===`.
+
+### R2. `[DONE]` Expose `--info-fd`
+
+Reviewer suggested bwrap's `--info-fd FD` — a JSON metadata blob
+written to an inherited fd after setup, containing the child's
+host-side PID and namespace info.  Useful for orchestrators that
+want structured sandbox state without parsing stderr.
+
+Shipped in v0.4.0 as a pass-through with integer validation and
+reserved-fd rejection (see F1 below).  End-to-end tested with both
+jq and grep fallback paths.
+
+### R3. `[DONE]` CI exercising the full matrix
+
+Reviewer asked for CI running against: `run`, `agent`, `--project-ro`,
+`--project-as`, `--lock-file`, `--sync-fd`, seccomp on/off,
+parent-death behavior, and more.
+
+Shipped in v0.4.1.  GitHub Actions workflow at `.github/workflows/ci.yml`:
+- Runner: `ubuntu-24.04` (single runner)
+- Defensive AppArmor unprivileged-userns sysctl relax
+  (Nix-built bwrap has no AppArmor profile, so the Ubuntu 24.04
+  default restriction blocks unprivileged userns without this step)
+- `flox/install-flox-action@v2`
+- `flox build bubblewrap-jail`
+- `check` subcommand (asserts exit 0)
+- Full `red-team.sh` suite via `flox activate --`
+
+First run: **green**.  CI badge on `README.md`.
+
+---
+
+## Nice-to-have
+
+Post-roadmap items proposed during ongoing use.  Not blocking,
+not strongly-recommended — just things worth doing when time
+permits.
+
+### 8. Lifecycle and orchestration
+
+- **L1. `[DONE in v0.2.7]` Add `--lock-file` support for supervisors.**
+  Shipped as part of V1 above (the reviewer's original observability
+  item).  Pass-through to bwrap's `--lock-file PATH`, with automatic
+  bind-mount of the lock path into the jail so bwrap can open it
+  from inside the namespace.  See the V1 entry and the V1 test block
+  in `test/red-team.sh` for details.
+
+- **L2. `[DONE in v0.2.7]` Add `--sync-fd` support if another process
+  needs a reliable "sandbox is alive" signal.**
+  Shipped as part of V1.  Pipe-EOF semantics: parent reads from a
+  pipe, wrapper inherits the write end via `--sync-fd`, pipe closes
+  when the sandbox exits.  `--info-fd` (added in v0.4.0 as R2 above)
+  is the machine-readable sibling — same fd-inheritance pattern,
+  JSON output.
+
+### 9. Durability
+
+- **D1. `[TODO]` Opt-in flush step for rw modes.**
+  Users who care about writes surviving abrupt exits can currently
+  lose data if the sandbox is killed mid-write.  Add an opt-in flag
+  (e.g. `--sync-on-exit`) that runs `syncfs(2)` on the project
+  filesystem (or agent-home filesystem) before exit, to flush
+  pending writes without a global `sync(1)`.  Linux's `syncfs()`
+  syscall gives targeted per-filesystem synchronization rather
+  than the system-wide flush that `sync` does.
+
+  Design notes:
+  - Default should be OFF — syncing costs, most workloads don't
+    need it, and we don't want to surprise existing users.
+  - No shell builtin for `syncfs`; options for the implementation:
+    - Small C helper compiled at build time (symmetric with
+      `gen-seccomp.c`); call via a trap/handler in the wrapper.
+    - `python3 -c 'import ctypes; ...'` — adds a Python runtime
+      dep, probably not worth it.
+    - Spawn a one-shot helper from inside the sandbox just before
+      exit, via bwrap's existing file-descriptor passing.
+  - Must execute INSIDE the jail (so it sees the project filesystem
+    via the bind) but BEFORE the jail exits — tricky to sequence
+    without racing the exec boundary.
+
+### 10. UX
+
+- **U1. `[PARTIAL]` A `doctor` / `check --verbose` mode.**
+  The existing `check` subcommand already prints every item on the
+  reviewer's list:
+
+  - `[DONE]` detected bwrap version →
+    `PASS  bwrap version: X.Y.Z`
+  - `[DONE]` required flags present/missing →
+    22 PASS lines + 3 OPT lines (after v0.4.0's split)
+  - `[DONE]` seccomp artifact status →
+    `PASS  seccomp BPF readable (N bytes at ...)`
+    `PASS  seccomp BPF loads into bwrap`
+  - `[DONE]` /nix availability →
+    `PASS  /nix/store present`
+  - `[DONE]` whether user namespaces appear usable →
+    `PASS  kernel user namespaces enabled (max_user_namespaces=N)`
+    `PASS  minimal bwrap launch works`
+
+  **Gaps:**
+  - No explicit `--verbose` flag (though the default output already
+    prints every probe result).
+  - No machine-readable format (`--json` would help orchestrators).
+  - No `doctor` alias for discoverability.  `check` is the reviewer's
+    preferred name, but some users may look for `doctor` by analogy
+    with `brew doctor`, `rustup doctor`, etc.  An alias would be
+    one line in the subcommand dispatcher.
+
+---
+
+## Execution status — original roadmap (v0.2.5 → v0.3.2)
+
+All 17 items from the reviewer's original must-have and strongly-
+recommended sections shipped between v0.2.5 and v0.3.2.  **Done.**
 
 | # | Item | Status | Lands in |
 |---|------|--------|----------|
@@ -177,4 +308,28 @@ All roadmap items shipped between v0.2.5 and v0.3.2. **Done.**
 | F2 | Reserved-mountpoint guard on user binds | DONE | v0.3.1 |
 | F3 | Mount ordering docs | DONE | v0.3.1 |
 
-Final state: red-team **110 / 0**, check **29 / 0**, runtime closure 35 paths.
+## Execution status — reviewer non-blockers (v0.4.x)
+
+| # | Item | Status | Lands in |
+|---|------|--------|----------|
+| R1 | Optional-probe split in `check` | DONE | v0.4.0 |
+| R2 | `--info-fd` pass-through | DONE | v0.4.0 |
+| R3 | GitHub Actions CI workflow | DONE | v0.4.1 |
+| F1 | Reject fd 10/11 for `--sync-fd`/`--info-fd` (audit loop) | DONE | v0.4.2 → v0.4.3 |
+
+## Execution status — nice-to-have
+
+| # | Item | Status | Lands in |
+|---|------|--------|----------|
+| L1 | `--lock-file` for supervisors | DONE (same as V1) | v0.2.7 |
+| L2 | `--sync-fd` for liveness signal | DONE (same as V1) | v0.2.7 |
+| D1 | Opt-in `syncfs()` flush for rw modes | TODO | — |
+| U1 | `doctor` / `check --verbose` mode | PARTIAL | existing `check` covers content; no `--verbose`/`--json`/`doctor` alias |
+
+Final state as of v0.4.3:
+- red-team **129 / 0** (stable across 10 consecutive runs)
+- check **29 / 0 required, 3 optional supported / 0 missing**
+- runtime closure **35 paths**
+- BPF blob **104 bytes**
+- shellcheck clean
+- CI green on ubuntu-24.04
