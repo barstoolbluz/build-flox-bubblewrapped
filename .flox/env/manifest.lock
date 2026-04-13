@@ -16,6 +16,9 @@
       "gcc": {
         "pkg-path": "gcc"
       },
+      "jq": {
+        "pkg-path": "jq"
+      },
       "libseccomp": {
         "pkg-path": "libseccomp",
         "outputs": [
@@ -42,12 +45,12 @@
     },
     "build": {
       "bubblewrap-jail": {
-        "command": "  set -euo pipefail\n\n  # Lint the script under shellcheck.  Style severity catches even nits.\n  shellcheck --severity=style --shell=bash src/bubblewrap-jail\n\n  # Compile the seccomp helper that generates the TIOCSTI-blocking BPF blob.\n  # -Wno-missing-field-initializers silences a warning from libseccomp's\n  # SCMP_A1 macro, which intentionally leaves the range-high field zeroed.\n  gcc -O2 -Wall -Wextra -Wno-missing-field-initializers \\\n      -o gen-seccomp src/gen-seccomp.c \\\n      $(pkg-config --cflags --libs libseccomp)\n\n  # Generate the BPF blob.  Refuse to ship an empty or implausibly large one.\n  ./gen-seccomp > tiocsti.bpf\n  bpf_bytes=$(wc -c < tiocsti.bpf)\n  if [ \"$bpf_bytes\" -lt 32 ] || [ \"$bpf_bytes\" -gt 4096 ]; then\n    echo \"gen-seccomp: unexpected BPF size $bpf_bytes\" >&2\n    exit 1\n  fi\n\n  # Generate the human-readable PFC dump (B2).  This is purely for\n  # review/audit — the wrapper doesn't read it at runtime — but shipping\n  # it alongside tiocsti.bpf gives an auditor a one-cat view of what the\n  # filter actually does without needing libseccomp tooling.\n  ./gen-seccomp --pfc > tiocsti.pfc\n  if [ ! -s tiocsti.pfc ]; then\n    echo \"gen-seccomp --pfc produced empty output\" >&2\n    exit 1\n  fi\n\n  # Sanity check: gen-seccomp should reject too many arguments (A9 guard).\n  # A regression that silently ignores extra args would let typos like\n  # \"gen-seccomp --pfc out.pfc\" pass without the user noticing.\n  if ./gen-seccomp --pfc extra-arg >/dev/null 2>&1; then\n    echo \"gen-seccomp accepts extra arguments (A9 regression)\" >&2\n    exit 1\n  fi\n\n  # Install artifacts.\n  install -Dm644 tiocsti.bpf         $out/share/bubblewrap-jail/tiocsti.bpf\n  install -Dm644 tiocsti.pfc         $out/share/bubblewrap-jail/tiocsti.pfc\n  install -Dm755 src/bubblewrap-jail $out/bin/bubblewrap-jail\n\n  # Substitute the final BPF path into the installed script.  The | delimiter\n  # avoids escaping the / in the nix store path.\n  sed -i \"s|@BPF_PATH@|$out/share/bubblewrap-jail/tiocsti.bpf|g\" \\\n      $out/bin/bubblewrap-jail\n",
+        "command": "  set -euo pipefail\n\n  # Lint the script under shellcheck.  Style severity catches even nits.\n  shellcheck --severity=style --shell=bash src/bubblewrap-jail\n\n  # Compile the seccomp helper that generates the TIOCSTI-blocking BPF blob.\n  # -Wno-missing-field-initializers silences a warning from libseccomp's\n  # SCMP_A1 macro, which intentionally leaves the range-high field zeroed.\n  gcc -O2 -Wall -Wextra -Wno-missing-field-initializers \\\n      -o gen-seccomp src/gen-seccomp.c \\\n      $(pkg-config --cflags --libs libseccomp)\n\n  # Generate the BPF blob.  Refuse to ship an empty or implausibly large one.\n  ./gen-seccomp > tiocsti.bpf\n  bpf_bytes=$(wc -c < tiocsti.bpf)\n  if [ \"$bpf_bytes\" -lt 32 ] || [ \"$bpf_bytes\" -gt 4096 ]; then\n    echo \"gen-seccomp: unexpected BPF size $bpf_bytes\" >&2\n    exit 1\n  fi\n\n  # Generate the human-readable PFC dump (B2).  This is purely for\n  # review/audit — the wrapper doesn't read it at runtime — but shipping\n  # it alongside tiocsti.bpf gives an auditor a one-cat view of what the\n  # filter actually does without needing libseccomp tooling.\n  ./gen-seccomp --pfc > tiocsti.pfc\n  if [ ! -s tiocsti.pfc ]; then\n    echo \"gen-seccomp --pfc produced empty output\" >&2\n    exit 1\n  fi\n\n  # Sanity check: gen-seccomp should reject too many arguments (A9 guard).\n  # A regression that silently ignores extra args would let typos like\n  # \"gen-seccomp --pfc out.pfc\" pass without the user noticing.\n  if ./gen-seccomp --pfc extra-arg >/dev/null 2>&1; then\n    echo \"gen-seccomp accepts extra arguments (A9 regression)\" >&2\n    exit 1\n  fi\n\n  # Install artifacts.\n  install -Dm644 tiocsti.bpf         $out/share/bubblewrap-jail/tiocsti.bpf\n  install -Dm644 tiocsti.pfc         $out/share/bubblewrap-jail/tiocsti.pfc\n  install -Dm755 src/bubblewrap-jail $out/bin/bubblewrap-jail\n\n  # Substitute the final BPF path into the installed script.  The | delimiter\n  # avoids escaping the / in the nix store path.\n  sed -i \"s|@BPF_PATH@|$out/share/bubblewrap-jail/tiocsti.bpf|g\" \\\n      $out/bin/bubblewrap-jail\n\n  # Substitute the wrapper version into the installed script.  Extract\n  # the version from $out's basename (path shape is\n  # /nix/store/HASH-bubblewrap-jail-X.Y.Z).  Used by `check --json` for\n  # the wrapper_version field.  CRITICAL: don't put @VERSION@ in any\n  # comment in the script — sed's global replace would rewrite it,\n  # same class of bug as C2 in v0.3.6.\n  pkg_version=$(basename \"$out\" | sed 's/.*-bubblewrap-jail-//')\n  sed -i \"s|@VERSION@|$pkg_version|g\" $out/bin/bubblewrap-jail\n",
         "runtime-packages": [
           "bubblewrap"
         ],
         "sandbox": "pure",
-        "version": "0.4.5",
+        "version": "0.4.6",
         "description": "Opinionated bubblewrap wrapper: run/agent subcommands, secure-by-default defaults"
       }
     }
@@ -252,6 +255,79 @@
         "info": "/nix/store/gzq6x9nsc2g1b4z0xlxnl3n8ahzcrgql-gcc-wrapper-15.2.0-info",
         "man": "/nix/store/n58glhbv7fnb3bqvbdh6ib7pv456cm4n-gcc-wrapper-15.2.0-man",
         "out": "/nix/store/hb2bs5fg5wkm04x565737qd5nh2hy5nk-gcc-wrapper-15.2.0"
+      },
+      "system": "x86_64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "jq",
+      "broken": false,
+      "derivation": "/nix/store/r7xkf6ii1frn2kcdwb48mbwbvikldhmy-jq-1.8.1.drv",
+      "description": "Lightweight and flexible command-line JSON processor",
+      "install_id": "jq",
+      "license": "MIT",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=4c1018dae018162ec878d42fec712642d214fdfa",
+      "name": "jq-1.8.1",
+      "pname": "jq",
+      "rev": "4c1018dae018162ec878d42fec712642d214fdfa",
+      "rev_count": 977467,
+      "rev_date": "2026-04-09T04:48:10Z",
+      "scrape_date": "2026-04-11T06:35:21.237723Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "1.8.1",
+      "outputs_to_install": [
+        "bin",
+        "bin",
+        "bin",
+        "man",
+        "man"
+      ],
+      "outputs": {
+        "bin": "/nix/store/h68aklwk28xbrg7pqaw078w1hvvvf419-jq-1.8.1-bin",
+        "dev": "/nix/store/kzsszlf69lndqilpgysw1j9b4hrfwjfx-jq-1.8.1-dev",
+        "doc": "/nix/store/rr0a4brsd47393640zn9zgw844rbkrsl-jq-1.8.1-doc",
+        "man": "/nix/store/l4npc0sgk51lz2d6jqnl4r18hmn6qckr-jq-1.8.1-man",
+        "out": "/nix/store/5jf55qkwrnd769ri9wxiy7z9kp5zb4ca-jq-1.8.1"
+      },
+      "system": "aarch64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "jq",
+      "broken": false,
+      "derivation": "/nix/store/0vb08cn5pf24mzjbibpc7n37g62lacfj-jq-1.8.1.drv",
+      "description": "Lightweight and flexible command-line JSON processor",
+      "install_id": "jq",
+      "license": "MIT",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=4c1018dae018162ec878d42fec712642d214fdfa",
+      "name": "jq-1.8.1",
+      "pname": "jq",
+      "rev": "4c1018dae018162ec878d42fec712642d214fdfa",
+      "rev_count": 977467,
+      "rev_date": "2026-04-09T04:48:10Z",
+      "scrape_date": "2026-04-11T07:39:35.046735Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "1.8.1",
+      "outputs_to_install": [
+        "bin",
+        "bin",
+        "bin",
+        "man"
+      ],
+      "outputs": {
+        "bin": "/nix/store/fc13hvlj7541i1xmwdka7f61qicdzr5a-jq-1.8.1-bin",
+        "dev": "/nix/store/plinh1rzkh83n4gfpkxl748zgaydpxll-jq-1.8.1-dev",
+        "doc": "/nix/store/ihgrvb9w91mwbhxx3fi3gcwwx3qlsdfv-jq-1.8.1-doc",
+        "man": "/nix/store/crwv17pim6csnfr4jmsd7kf60sp3c5dh-jq-1.8.1-man",
+        "out": "/nix/store/s4w1j16dj8wyriv1ljfypr9s1r39yjwp-jq-1.8.1"
       },
       "system": "x86_64-linux",
       "group": "toplevel",

@@ -855,6 +855,39 @@ expect_stdout_matches \
   "0 failed" -- \
   "$JAIL" check
 
+# U1: --json output mode.  Tests are gated on jq availability; jq is
+# in the build env's [install] for v0.4.6 onward, so it should always
+# be present in the test harness.  Fall back to substring checks
+# otherwise for defensive portability.
+if command -v jq >/dev/null 2>&1; then
+  expect_pass \
+    "check --json: output parses as valid JSON" -- \
+    bash -c '"$1" check --json 2>/dev/null | jq -e . >/dev/null' _ "$JAIL"
+  expect_pass \
+    "check --json: has top-level schema/wrapper_version/probes/summary" -- \
+    bash -c '"$1" check --json 2>/dev/null | jq -e ".schema, .wrapper_version, .probes, .summary | . != null" >/dev/null' _ "$JAIL"
+  expect_pass \
+    "check --json: summary.ok is true on this host" -- \
+    bash -c '"$1" check --json 2>/dev/null | jq -e ".summary.ok == true" >/dev/null' _ "$JAIL"
+  expect_pass \
+    "check --json: summary.passed equals PASS line count of text mode" -- \
+    bash -c '
+      text_passes=$("$1" check 2>/dev/null | grep -c "^  PASS ")
+      json_passed=$("$1" check --json 2>/dev/null | jq .summary.passed)
+      test "$text_passes" = "$json_passed"
+    ' _ "$JAIL"
+  expect_pass \
+    "check --json: schema pinned to bubblewrap-jail-check/1" -- \
+    bash -c '"$1" check --json 2>/dev/null | jq -e ".schema == \"bubblewrap-jail-check/1\"" >/dev/null' _ "$JAIL"
+else
+  echo "  skip: jq not available, check --json tests skipped (non-fatal)"
+fi
+
+# U1: doctor is an alias for check — text output should be bit-identical.
+expect_pass \
+  "doctor: text output matches check text output exactly" -- \
+  bash -c 'diff <("$1" check 2>&1) <("$1" doctor 2>&1) >/dev/null' _ "$JAIL"
+
 # Probe-split: check subcommand should emit OPT lines for optional features
 # (--lock-file, --sync-fd, --info-fd).  At least one OPT line required.
 expect_pass \

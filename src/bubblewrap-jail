@@ -47,6 +47,12 @@ prog="bubblewrap-jail"
 # unsubstituted and the seccomp filter is skipped with a stderr warning.
 BPF_PATH="@BPF_PATH@"
 
+# Wrapper version string, substituted at build time (extracted from the
+# nix store path in the build command).  Used by `check --json` for the
+# wrapper_version field so consumers can tell which wrapper they're
+# talking to.  Source-mode runs carry the unsubstituted placeholder.
+VERSION="@VERSION@"
+
 err() { printf '%s: %s\n' "$prog" "$*" >&2; }
 die() { err "$*"; exit 1; }
 
@@ -60,7 +66,12 @@ Subcommands:
   run       Jail a command.  Minimal filesystem view, no project binding.
   agent     Jail an agent.   Project dir rw, persistent agent home.
   check     Probe the host for required bwrap/kernel features.  Reports
-            PASS/FAIL per check and exits 0 (all green) or 1 (anything red).
+            PASS/FAIL/OPT per check and exits 0 (all required green) or
+            1 (anything required red).  Optional features report on OPT
+            lines and don't affect the exit code.  Pass \`--json\` for a
+            machine-readable document (schema bubblewrap-jail-check/1)
+            instead of the human-readable text output.
+  doctor    Alias for \`check\`.  Same output, same exit code.
 
 Common options:
   --net             Enable network (adds TLS certs, DNS, hosts).
@@ -204,20 +215,52 @@ Mount ordering (bwrap applies operations in argv order; later wins):
 # -----------------------------------------------------------------------------
 
 run_check() {
+  # Parse check-specific flags.  --json switches to machine-readable
+  # output; default is human-readable text.
+  local output_format=text
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --json) output_format=json; shift ;;
+      *)      die "check: unknown option: $1" ;;
+    esac
+  done
+
   local checks_passed=0 checks_failed=0 opt_present=0 opt_missing=0
   local help_out flag ver mun bsz
+  # Probe records are collected in parallel arrays.  In text mode we
+  # also print each probe line in real time; in json mode we only emit
+  # at the end via _emit_check_json.
+  local -a probe_names=() probe_statuses=()
 
   # These are function definitions, not variables — shellcheck gets confused
   # if they appear in a `local` declaration.  Function scope in bash is global
   # regardless of where they're defined, but that's fine for our use.
-  pass_msg() { printf '  PASS  %s\n' "$1"; checks_passed=$((checks_passed+1)); }
-  fail_msg() {
-    if [ $# -ge 2 ] && [ -n "$2" ]; then
-      printf '  FAIL  %s — %s\n' "$1" "$2"
-    else
-      printf '  FAIL  %s\n' "$1"
+  pass_msg() {
+    probe_names+=("$1"); probe_statuses+=("pass")
+    checks_passed=$((checks_passed+1))
+    # `if/then/fi` (not `&&`) so the function returns 0 in both
+    # text and json modes — an `&&` whose left side is false would
+    # propagate a 1 return status and trip `set -e` in the caller.
+    if [ "$output_format" = text ]; then
+      printf '  PASS  %s\n' "$1"
     fi
+  }
+  fail_msg() {
+    # For record purposes, we store just the name; the detail (if any)
+    # goes in the text-mode line.  JSON consumers match on name.
+    local fail_name=$1
+    if [ $# -ge 2 ] && [ -n "$2" ]; then
+      fail_name="$1 — $2"
+    fi
+    probe_names+=("$fail_name"); probe_statuses+=("fail")
     checks_failed=$((checks_failed+1))
+    if [ "$output_format" = text ]; then
+      if [ $# -ge 2 ] && [ -n "$2" ]; then
+        printf '  FAIL  %s — %s\n' "$1" "$2"
+      else
+        printf '  FAIL  %s\n' "$1"
+      fi
+    fi
   }
   # Optional: probe succeeded (feature supported) but missing would NOT be
   # a failure — the wrapper only uses the flag if the user opts in at runtime.
@@ -225,23 +268,86 @@ run_check() {
   # apart.  Does not affect checks_passed or checks_failed.
   opt_msg() {
     if [ "$2" = "present" ]; then
-      printf '  OPT   bwrap supports %s  (optional: only needed if %s is passed at runtime)\n' "$1" "$1"
+      probe_names+=("bwrap supports $1"); probe_statuses+=("opt_supported")
       opt_present=$((opt_present+1))
+      if [ "$output_format" = text ]; then
+        printf '  OPT   bwrap supports %s  (optional: only needed if %s is passed at runtime)\n' "$1" "$1"
+      fi
     else
-      printf '  OPT   bwrap missing  %s  (optional: %s will fail if used)\n' "$1" "$1"
+      probe_names+=("bwrap supports $1"); probe_statuses+=("opt_missing")
       opt_missing=$((opt_missing+1))
+      if [ "$output_format" = text ]; then
+        printf '  OPT   bwrap missing  %s  (optional: %s will fail if used)\n' "$1" "$1"
+      fi
     fi
   }
 
-  printf '=== bubblewrap-jail compat probe ===\n'
+  # JSON string escaper: handles backslash, double quote, and control
+  # characters (newline, tab, carriage return).  Our probe data is
+  # ASCII-clean in practice, but defensive escaping keeps the output
+  # valid even if a future probe emits a weird string.  CRITICAL:
+  # escape backslash FIRST, otherwise later escape substitutions get
+  # double-escaped.
+  _json_str() {
+    local s=$1
+    s=${s//\\/\\\\}
+    s=${s//\"/\\\"}
+    s=${s//$'\n'/\\n}
+    s=${s//$'\t'/\\t}
+    s=${s//$'\r'/\\r}
+    printf '"%s"' "$s"
+  }
+
+  # Emit the collected probe records as a JSON document on stdout.
+  # Schema version pinned to "bubblewrap-jail-check/1".  Within this
+  # schema, probe NAMES are stable — consumers can match on them.
+  # Adding a new probe is non-breaking and stays at /1; renaming,
+  # removing, or changing the semantics of an existing probe bumps
+  # to /2.
+  _emit_check_json() {
+    local i n ok=false
+    [ "$checks_failed" -eq 0 ] && ok=true
+    n=${#probe_names[@]}
+    printf '{\n'
+    printf '  "schema": "bubblewrap-jail-check/1",\n'
+    printf '  "wrapper_version": %s,\n' "$(_json_str "$VERSION")"
+    printf '  "probes": [\n'
+    for ((i=0; i<n; i++)); do
+      printf '    {"name": %s, "status": %s}' \
+        "$(_json_str "${probe_names[i]}")" \
+        "$(_json_str "${probe_statuses[i]}")"
+      if [ "$i" -lt "$((n-1))" ]; then
+        printf ',\n'
+      else
+        printf '\n'
+      fi
+    done
+    printf '  ],\n'
+    printf '  "summary": {\n'
+    printf '    "passed": %d,\n'        "$checks_passed"
+    printf '    "failed": %d,\n'        "$checks_failed"
+    printf '    "opt_supported": %d,\n' "$opt_present"
+    printf '    "opt_missing": %d,\n'   "$opt_missing"
+    printf '    "ok": %s\n'             "$ok"
+    printf '  }\n'
+    printf '}\n'
+  }
+
+  if [ "$output_format" = text ]; then
+    printf '=== bubblewrap-jail compat probe ===\n'
+  fi
 
   # bwrap present and runnable?
   if command -v bwrap >/dev/null 2>&1; then
     pass_msg "bwrap in PATH ($(command -v bwrap))"
   else
     fail_msg "bwrap not found in PATH"
-    printf '=== result: %d passed, %d failed; optional: %d supported / %d missing ===\n' \
-      "$checks_passed" "$checks_failed" "$opt_present" "$opt_missing"
+    if [ "$output_format" = text ]; then
+      printf '=== result: %d passed, %d failed; optional: %d supported / %d missing ===\n' \
+        "$checks_passed" "$checks_failed" "$opt_present" "$opt_missing"
+    else
+      _emit_check_json
+    fi
     return 1
   fi
 
@@ -357,8 +463,12 @@ run_check() {
       ;;
   esac
 
-  printf '=== result: %d passed, %d failed; optional: %d supported / %d missing ===\n' \
-    "$checks_passed" "$checks_failed" "$opt_present" "$opt_missing"
+  if [ "$output_format" = text ]; then
+    printf '=== result: %d passed, %d failed; optional: %d supported / %d missing ===\n' \
+      "$checks_passed" "$checks_failed" "$opt_present" "$opt_missing"
+  else
+    _emit_check_json
+  fi
   [ "$checks_failed" -eq 0 ]
 }
 
@@ -372,10 +482,10 @@ if [ "$#" -lt 1 ]; then
 fi
 
 case "$1" in
-  run|agent) cmd=$1; shift ;;
-  check)     run_check; exit $? ;;
-  -h|--help) usage; exit 0 ;;
-  *) usage >&2; die "unknown subcommand: $1" ;;
+  run|agent)    cmd=$1; shift ;;
+  check|doctor) shift; run_check "$@"; exit $? ;;
+  -h|--help)    usage; exit 0 ;;
+  *)            usage >&2; die "unknown subcommand: $1" ;;
 esac
 
 # -----------------------------------------------------------------------------
