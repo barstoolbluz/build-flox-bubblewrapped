@@ -47,7 +47,7 @@
           "bubblewrap"
         ],
         "sandbox": "pure",
-        "version": "0.3.0",
+        "version": "0.3.1",
         "description": "Opinionated bubblewrap wrapper: run/agent subcommands, secure-by-default defaults"
       }
     }

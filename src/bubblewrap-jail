@@ -66,9 +66,16 @@ Common options:
   --net             Enable network (adds TLS certs, DNS, hosts).
   --no-net          Disable network.
   --bind SRC DST    Additional rw bind: mount host SRC at jail path DST.
-                    Argument order matches bwrap(1).  May repeat.
+                    Argument order matches bwrap(1).  May repeat.  DST
+                    must not shadow an FHS-essential dir (/, /bin, /sbin,
+                    /usr, /lib, /lib64, /etc, /proc, /dev, /nix); use
+                    --bind-force to override.
   --ro-bind SRC DST Additional ro bind: mount host SRC at jail path DST.
-                    Argument order matches bwrap(1).  May repeat.
+                    Argument order matches bwrap(1).  May repeat.  Same
+                    DST guard as --bind.
+  --bind-force      Disable the essential-dir shadowing guard for user
+                    --bind / --ro-bind.  For advanced users who genuinely
+                    need to bind on top of /usr or similar.
   --setenv K V      Allowlist additional environment variable (may repeat).
   --hostname NAME   Sandbox hostname (default: bubblewrap-jail).
   --no-seccomp      Disable the default TIOCSTI-blocking seccomp filter.
@@ -101,6 +108,9 @@ Agent-only options:
                     stronger structural isolation, at the cost of breaking
                     tools that embed absolute paths in caches, debug info,
                     venvs, or linked git worktrees.
+  --project-ro      Bind the project read-only.  Default is rw.  Useful
+                    for read-only review/inspection workflows where the
+                    agent should not be able to mutate the source tree.
   --agent-home DIR  Persistent agent HOME.
                     Default: \$FLOX_ENV_CACHE/agent-home, else
                     \${XDG_CACHE_HOME:-\$HOME/.cache}/bubblewrap-jail/agent-home.
@@ -156,7 +166,26 @@ re-expose them with --bind / --ro-bind):
 Treat this list as a policy, not a guarantee.  If you pass
   --bind \$HOME/.ssh \$HOME/.ssh
 the ssh keys will be visible inside the jail.  User-supplied binds are
-applied AFTER the default policy and can therefore re-expose anything."
+applied AFTER the default policy and can therefore re-expose anything.
+
+Mount ordering (bwrap applies operations in argv order; later wins):
+  1. Skeleton ro:  /usr /bin /sbin /lib /lib64 /nix
+  2. /etc tmpfs + ro-bind allowlist (passwd, group, ld.so.*, nsswitch,
+     localtime, etc.).  Critically NOT bound: shadow, sudoers, ssh, pam.d.
+  3. Fresh tmpfs:  /proc /dev /tmp /var/tmp /run
+  4. Network:      ro-bind resolv.conf, hosts, ssl, ca-certs (or
+                   --unshare-net if --no-net)
+  5. Environment:  --clearenv then explicit --setenv (see \"Environment
+                   in jail\" above)
+  6. Mode binds:   agent → project (rw or ro), agent-home, gitconfig,
+                   passthrough env vars
+                   run   → HOME=/tmp, --new-session
+  7. User extras:  --bind, --ro-bind, --setenv (so user can re-expose
+                   anything from the default policy or layer on more)
+  8. Seal:         --remount-ro /etc (the tmpfs becomes ro; existing
+                   bind mounts on top of it survive)
+  9. Lifecycle:    --lock-file, --sync-fd
+  10. Safety:      --seccomp (TIOCSTI BPF blob)"
 }
 
 # NOTE: no "bwrap present?" check here on purpose.  We want --help and
@@ -314,6 +343,7 @@ esac
 net=""                    # "" = use subcommand default
 project=""
 project_as=""             # "" = same-path bind (no remapping)
+project_ro=0              # 1 = bind project as --ro-bind instead of --bind (F1)
 agent_home=""
 extra_bind=()
 extra_ro_bind=()
@@ -324,6 +354,7 @@ passthrough_envs_set_by_flag=0  # tracks --passthrough-env for run-mode rejectio
 seccomp_enabled=1         # may be cleared by --no-seccomp
 lock_file=""              # --lock-file PATH passthrough (V1)
 sync_fd=""                # --sync-fd FD  passthrough (V1)
+bind_force=0              # --bind-force opts out of essential-dst guard (F2)
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -341,8 +372,10 @@ while [ "$#" -gt 0 ]; do
                      project=$2; shift 2 ;;
     --project-as)    [ "$#" -ge 2 ] || die "--project-as needs DIR"
                      project_as=$2; shift 2 ;;
+    --project-ro)    project_ro=1; shift ;;
     --agent-home)    [ "$#" -ge 2 ] || die "--agent-home needs DIR"
                      agent_home=$2; shift 2 ;;
+    --bind-force)    bind_force=1; shift ;;
     --passthrough-env)
                      [ "$#" -ge 2 ] || die "--passthrough-env needs VAR"
                      # Repeatable: each occurrence appends one var name.
@@ -396,7 +429,36 @@ if [ "$cmd" = "run" ]; then
   [ -z "$project"    ] || die "--project is agent-only"
   [ -z "$project_as" ] || die "--project-as is agent-only"
   [ -z "$agent_home" ] || die "--agent-home is agent-only"
+  [ "$project_ro" = 0 ] || die "--project-ro is agent-only"
   [ "$passthrough_envs_set_by_flag" = 0 ] || die "--passthrough-env is agent-only"
+fi
+
+# F2: validate user --bind / --ro-bind destinations.  Reject paths that
+# would shadow an FHS-essential directory and break the sandbox (the
+# user has set up a bind that bwrap will accept and then bwrap's
+# subsequent operations or the user command will fail because /bin or
+# /usr is no longer there).  Sub-paths of essentials (e.g. /etc/foo,
+# /usr/local/share/x) are allowed — that's the documented escape hatch
+# for re-exposing specific files.  --bind-force opts out entirely for
+# advanced users who know what they're doing.
+if [ "$bind_force" = 0 ]; then
+  _check_user_bind_dst() {
+    case "$1" in
+      / | /bin | /sbin | /usr | /lib | /lib64 | /etc | /proc | /dev | /nix)
+        die "--bind/--ro-bind dst would shadow essential dir: $1 (use --bind-force to override)" ;;
+    esac
+  }
+  i=0
+  while [ $i -lt ${#extra_bind[@]} ]; do
+    _check_user_bind_dst "${extra_bind[i+1]}"
+    i=$((i + 2))
+  done
+  i=0
+  while [ $i -lt ${#extra_ro_bind[@]} ]; do
+    _check_user_bind_dst "${extra_ro_bind[i+1]}"
+    i=$((i + 2))
+  done
+  unset -f _check_user_bind_dst
 fi
 
 # -----------------------------------------------------------------------------
@@ -550,8 +612,13 @@ args+=(
 
 # Mode-specific bindings.
 if [ "$cmd" = "agent" ]; then
+  # Project bind: rw by default, ro if --project-ro is set (F1).
+  if [ "$project_ro" = 1 ]; then
+    args+=(--ro-bind "$project" "$project_as")
+  else
+    args+=(--bind    "$project" "$project_as")
+  fi
   args+=(
-    --bind "$project"    "$project_as"
     --bind "$agent_home" "$agent_home"
     --setenv HOME "$agent_home"
     --setenv TMPDIR "/tmp"

@@ -348,6 +348,44 @@ expect_fail \
   "run: --project-as is agent-only" -- \
   "$JAIL" run --project-as /workspace -- true
 
+# F1: --project-ro read-only project mode.  DIR_B has readme.txt from the
+# project-as test block above.
+expect_pass \
+  "agent: --project-ro can read project content (DIR_B/readme.txt)" -- \
+  bash -c "cd \"\$1\" && \"\$2\" agent --project-ro -- cat readme.txt" _ "$DIR_B" "$JAIL"
+expect_fail \
+  "agent: --project-ro makes project not writable" -- \
+  bash -c "cd \"\$1\" && \"\$2\" agent --project-ro -- touch .ro-write-test" _ "$DIR_B" "$JAIL"
+expect_fail \
+  "run: --project-ro is agent-only" -- \
+  "$JAIL" run --project-ro -- true
+
+# F2: --bind/--ro-bind essential-dir guard.  Reject destinations that
+# would shadow FHS-essential paths and break the sandbox.  Sub-paths are
+# still allowed (B1's user --bind into /etc/foo still works).
+expect_fail "run: --bind dst=/ rejected"          -- "$JAIL" run --bind /tmp / -- true
+expect_fail "run: --bind dst=/usr rejected"       -- "$JAIL" run --bind /tmp /usr -- true
+expect_fail "run: --bind dst=/bin rejected"       -- "$JAIL" run --bind /tmp /bin -- true
+expect_fail "run: --bind dst=/lib rejected"       -- "$JAIL" run --bind /tmp /lib -- true
+expect_fail "run: --bind dst=/etc rejected"       -- "$JAIL" run --bind /tmp /etc -- true
+expect_fail "run: --bind dst=/proc rejected"      -- "$JAIL" run --bind /tmp /proc -- true
+expect_fail "run: --bind dst=/dev rejected"       -- "$JAIL" run --bind /tmp /dev -- true
+expect_fail "run: --bind dst=/nix rejected"       -- "$JAIL" run --bind /tmp /nix -- true
+expect_fail "run: --ro-bind dst=/usr rejected"    -- "$JAIL" run --ro-bind /tmp /usr -- true
+
+# Sub-paths of essentials are still allowed (T4 above already proves
+# this for /etc/foo — the only essential whose parent is rw enough for
+# bwrap to mkdir the mount point.  /usr/local/foo would require /usr to
+# be writable, which it isn't.  So T4 is the canonical sub-path test).
+
+# F2: --bind-force opts out of the guard.  Test by rebinding /usr → /usr
+# (a no-op semantically; the source IS the existing host /usr) and
+# verifying the wrapper passes its own check (i.e. doesn't die before
+# reaching bwrap).
+expect_pass \
+  "run: --bind-force lets user shadow essential dir (re-bind /usr→/usr)" -- \
+  "$JAIL" run --bind-force --bind /usr /usr -- ls /usr
+
 # N1 regression: --passthrough-env is documented agent-only and must be
 # rejected in run mode, not silently accepted with a dead value.
 expect_fail \
