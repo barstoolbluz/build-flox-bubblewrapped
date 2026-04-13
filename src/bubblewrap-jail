@@ -251,6 +251,7 @@ extra_ro_bind=()
 extra_setenv=()
 hostname="bubblewrap-jail"
 passthrough_env="${BUBBLEWRAP_JAIL_PASSTHROUGH_ENV:-ANTHROPIC_API_KEY}"
+passthrough_env_set_by_flag=0  # tracks --passthrough-env for run-mode rejection
 seccomp_enabled=1         # may be cleared by --no-seccomp
 
 while [ "$#" -gt 0 ]; do
@@ -273,7 +274,7 @@ while [ "$#" -gt 0 ]; do
                      agent_home=$2; shift 2 ;;
     --passthrough-env)
                      [ "$#" -ge 2 ] || die "--passthrough-env needs VAR"
-                     passthrough_env=$2; shift 2 ;;
+                     passthrough_env=$2; passthrough_env_set_by_flag=1; shift 2 ;;
     --no-seccomp)    seccomp_enabled=0; shift ;;
     -h|--help)       usage; exit 0 ;;
     --)              shift; break ;;
@@ -294,10 +295,14 @@ case "$passthrough_env" in
 esac
 
 # Reject agent-only flags in run mode so misuse is noisy, not silent.
+# --passthrough-env needs its own tracking boolean because passthrough_env
+# always has a non-empty default, so we can't distinguish "user set it" from
+# "default applied" by emptiness.
 if [ "$cmd" = "run" ]; then
   [ -z "$project"    ] || die "--project is agent-only"
   [ -z "$project_as" ] || die "--project-as is agent-only"
   [ -z "$agent_home" ] || die "--agent-home is agent-only"
+  [ "$passthrough_env_set_by_flag" = 0 ] || die "--passthrough-env is agent-only"
 fi
 
 # -----------------------------------------------------------------------------

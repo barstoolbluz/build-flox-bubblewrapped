@@ -285,6 +285,12 @@ expect_fail \
   "run: --project-as is agent-only" -- \
   "$JAIL" run --project-as /workspace -- true
 
+# N1 regression: --passthrough-env is documented agent-only and must be
+# rejected in run mode, not silently accepted with a dead value.
+expect_fail \
+  "run: --passthrough-env is agent-only" -- \
+  "$JAIL" run --passthrough-env MY_TOKEN -- true
+
 echo
 echo "[seccomp: TIOCSTI blocked]"
 # Inside the jail, ioctl(STDIN, TIOCSTI, ...) should fail with EPERM because
