@@ -90,9 +90,10 @@ Environment variables (used as defaults; flags override):
 
 Defaults:
   run mode:   net off; HOME=/tmp; cwd=/tmp; no project binding.
-  agent mode: net on;  HOME=<agent-home>; cwd=<project>; host \$PATH inherited;
-              API key passed through if set on host; host ~/.gitconfig
-              ro-bound if present.
+  agent mode: net on;  HOME=<agent-home>;
+              cwd=<project> (or <project-as> if --project-as is set);
+              host \$PATH inherited; API key passed through if set on host;
+              host ~/.gitconfig ro-bound if present.
 
 Not mounted by default (i.e. hidden from the jail unless you explicitly
 re-expose them with --bind / --ro-bind):
@@ -150,11 +151,20 @@ run_check() {
     fail_msg "bwrap --version returned nothing parseable"
   fi
 
-  # Required bwrap features (grep --help).
+  # Required bwrap features (grep --help).  This list MUST stay in sync
+  # with the flags the wrapper actually passes at runtime — a green check
+  # that omits a required flag is worse than no check at all.  If you add
+  # a new bwrap flag anywhere else in this script, add it here too.
   help_out=$(bwrap --help 2>/dev/null)
-  for flag in --unshare-user --unshare-pid --disable-userns --assert-userns-disabled \
-              --die-with-parent --remount-ro --tmpfs --ro-bind --ro-bind-try --seccomp \
-              --clearenv --setenv --chdir; do
+  for flag in \
+      --unshare-user --unshare-ipc --unshare-pid --unshare-uts \
+      --unshare-cgroup-try --unshare-net \
+      --disable-userns --assert-userns-disabled \
+      --die-with-parent --hostname --new-session \
+      --bind --ro-bind --ro-bind-try \
+      --tmpfs --proc --dev --remount-ro \
+      --clearenv --setenv --chdir --seccomp
+  do
     if printf '%s' "$help_out" | grep -q -- "$flag"; then
       pass_msg "bwrap supports $flag"
     else
@@ -489,10 +499,15 @@ if [ "$cmd" = "agent" ]; then
   # setsid() and detaches from the controlling tty, which breaks interactive
   # CLIs like Claude Code.  The TIOCSTI class of attack is instead mitigated
   # by the seccomp BPF filter loaded below (see gen-seccomp.c), which blocks
-  # ioctl(_, TIOCSTI, _) with EPERM regardless of kernel version.  On kernels
-  # >=5.17 the dev.tty.legacy_tiocsti_restrict sysctl provides a redundant
-  # belt-and-braces; if --no-seccomp is passed, that sysctl becomes the only
-  # defense, so don't disable seccomp on older kernels.
+  # ioctl(_, TIOCSTI, _) with EPERM regardless of kernel version.
+  #
+  # Belt-and-braces at the kernel level: on Linux 6.2+, injecting characters
+  # into another process's tty via TIOCSTI requires CAP_SYS_ADMIN when the
+  # dev.tty.legacy_tiocsti sysctl is false (the default on modern distros).
+  # That is independent of our seccomp filter.  But if --no-seccomp is passed
+  # on an older kernel, or on a host that has flipped dev.tty.legacy_tiocsti
+  # to true for compatibility reasons, TIOCSTI is unfiltered — so don't
+  # disable seccomp unless you've verified your kernel's TIOCSTI policy.
 else
   # run mode: neutral HOME, scratch cwd, new session (no interactive tty needs).
   args+=(

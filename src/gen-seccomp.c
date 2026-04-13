@@ -7,11 +7,25 @@
  * seccomp_export_bpf().  The shell script at runtime passes this blob to
  * bwrap via --seccomp <fd>.
  *
- * Why this matters: without a seccomp filter and without --new-session, a
- * process inside the sandbox can inject characters into its parent's
- * controlling terminal using ioctl(tty_fd, TIOCSTI, &c).  This filter closes
- * that class of attack without detaching the sandbox from its pty (which
- * --new-session would do, breaking interactive agent workflows).
+ * Scope (important): this filter exists to close ONE attack class —
+ * ioctl(tty_fd, TIOCSTI, &c) being used by sandboxed code to inject
+ * characters into the parent's controlling terminal.  It is NOT a
+ * general-purpose hostile-code sandbox.  Agent mode deliberately allows
+ * every other syscall because the wrapper's threat model is prompt
+ * injection (a buggy/steerable agent), not arbitrary malicious binaries.
+ * See src/bubblewrap-jail header for the full threat model.
+ *
+ * Why THIS filter matters: without it, and without bwrap --new-session,
+ * a process inside the sandbox can inject characters into its parent's
+ * controlling terminal.  We can't pass --new-session in agent mode
+ * because setsid() detaches the sandbox from its pty and breaks
+ * interactive agent workflows (Claude Code etc. want a real tty).
+ *
+ * Portability note: the RULE LOGIC here is architecture-independent
+ * (libseccomp abstracts the syscall-number differences), but the
+ * EMITTED BPF blob is a per-architecture build artifact — BPF encodes
+ * raw syscall numbers, and those differ between x86_64, aarch64, etc.
+ * Treat tiocsti.bpf as target-specific; build on each target arch.
  *
  * Build: gcc -O2 -Wall -Wextra -o gen-seccomp gen-seccomp.c $(pkg-config --cflags --libs libseccomp)
  * Run:   ./gen-seccomp > tiocsti.bpf
@@ -19,7 +33,6 @@
 
 #include <errno.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <sys/ioctl.h>
 
 #include <seccomp.h>
@@ -34,8 +47,9 @@ int main(void) {
 
     /* Rule: ioctl(_, TIOCSTI, _) → EPERM.  Argument 1 (zero-indexed) is
      * the request code; TIOCSTI is a scalar constant so a direct EQ match
-     * is both safe and architecture-portable (seccomp-bpf permits argument
-     * comparisons only against scalar values, not dereferenced pointers). */
+     * is safe — seccomp-bpf permits argument comparisons only against
+     * scalar values, never dereferenced pointers, so the filter cannot be
+     * defeated by aliasing the request through a pointer. */
     int rc = seccomp_rule_add(ctx, SCMP_ACT_ERRNO(EPERM),
                               SCMP_SYS(ioctl), 1,
                               SCMP_A1(SCMP_CMP_EQ, (scmp_datum_t)TIOCSTI));
