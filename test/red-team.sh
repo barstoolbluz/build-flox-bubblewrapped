@@ -287,6 +287,22 @@ expect_fail \
   env -i PATH=/nonexistent "$BASH_BIN" "$JAIL" bogus
 
 echo
+echo "[check subcommand]"
+expect_pass \
+  "check: exits 0 on this host" -- \
+  "$JAIL" check
+
+expect_stdout_matches \
+  "check: reports PASS lines" \
+  "PASS" -- \
+  "$JAIL" check
+
+expect_stdout_matches \
+  "check: reports 0 failed" \
+  "0 failed" -- \
+  "$JAIL" check
+
+echo
 echo "=== summary: $pass passed, $fail failed ==="
 if [ $fail -gt 0 ]; then
   printf 'failed:\n'

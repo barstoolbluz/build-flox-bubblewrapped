@@ -45,6 +45,8 @@ Usage: $prog <subcommand> [options] -- CMD [ARGS...]
 Subcommands:
   run       Jail a command.  Minimal filesystem view, no project binding.
   agent     Jail an agent.   Project dir rw, persistent agent home.
+  check     Probe the host for required bwrap/kernel features.  Reports
+            PASS/FAIL per check and exits 0 (all green) or 1 (anything red).
 
 Common options:
   --net             Enable network (adds TLS certs, DNS, hosts).
@@ -107,6 +109,106 @@ applied AFTER the default policy and can therefore re-expose anything."
 # dependency check happens right before exec bwrap at the bottom of the file.
 
 # -----------------------------------------------------------------------------
+# check subcommand: compat probe
+# -----------------------------------------------------------------------------
+
+run_check() {
+  local checks_passed=0 checks_failed=0
+  local help_out flag ver mun bsz
+
+  # These are function definitions, not variables — shellcheck gets confused
+  # if they appear in a `local` declaration.  Function scope in bash is global
+  # regardless of where they're defined, but that's fine for our use.
+  pass_msg() { printf '  PASS  %s\n' "$1"; checks_passed=$((checks_passed+1)); }
+  fail_msg() {
+    if [ $# -ge 2 ] && [ -n "$2" ]; then
+      printf '  FAIL  %s — %s\n' "$1" "$2"
+    else
+      printf '  FAIL  %s\n' "$1"
+    fi
+    checks_failed=$((checks_failed+1))
+  }
+
+  printf '=== bubblewrap-jail compat probe ===\n'
+
+  # bwrap present and runnable?
+  if command -v bwrap >/dev/null 2>&1; then
+    pass_msg "bwrap in PATH ($(command -v bwrap))"
+  else
+    fail_msg "bwrap not found in PATH"
+    printf '=== result: %d passed, %d failed ===\n' "$checks_passed" "$checks_failed"
+    return 1
+  fi
+
+  # bwrap version
+  ver=$(bwrap --version 2>/dev/null | awk '{print $NF; exit}')
+  if [ -n "$ver" ]; then
+    pass_msg "bwrap version: $ver"
+  else
+    fail_msg "bwrap --version returned nothing parseable"
+  fi
+
+  # Required bwrap features (grep --help).
+  help_out=$(bwrap --help 2>/dev/null)
+  for flag in --unshare-user --unshare-pid --disable-userns --assert-userns-disabled \
+              --die-with-parent --remount-ro --tmpfs --ro-bind --ro-bind-try --seccomp \
+              --clearenv --setenv --chdir; do
+    if printf '%s' "$help_out" | grep -q -- "$flag"; then
+      pass_msg "bwrap supports $flag"
+    else
+      fail_msg "bwrap missing feature" "$flag"
+    fi
+  done
+
+  # Kernel sysctls / caps
+  if [ -r /proc/sys/user/max_user_namespaces ]; then
+    mun=$(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo 0)
+    if [ "$mun" -gt 0 ] 2>/dev/null; then
+      pass_msg "kernel user namespaces enabled (max_user_namespaces=$mun)"
+    else
+      fail_msg "user namespaces disabled" "user.max_user_namespaces=0"
+    fi
+  else
+    fail_msg "cannot read /proc/sys/user/max_user_namespaces"
+  fi
+
+  # End-to-end smoke: can bwrap build and enter a minimal sandbox?
+  if bwrap --ro-bind / / --disable-userns --assert-userns-disabled \
+           --unshare-user --unshare-pid --die-with-parent \
+           true 2>/dev/null
+  then
+    pass_msg "minimal bwrap launch works"
+  else
+    fail_msg "minimal bwrap launch failed"
+  fi
+
+  # /nix store presence
+  if [ -d /nix/store ]; then
+    pass_msg "/nix/store present"
+  else
+    fail_msg "/nix/store absent (non-Nix host)" "many flox-packaged tools won't resolve"
+  fi
+
+  # Seccomp BPF blob shipped with this installation?
+  case "$BPF_PATH" in
+    /*)
+      if [ -r "$BPF_PATH" ]; then
+        bsz=$(wc -c <"$BPF_PATH" 2>/dev/null || echo 0)
+        pass_msg "seccomp BPF readable ($bsz bytes at $BPF_PATH)"
+      else
+        fail_msg "seccomp BPF not readable at $BPF_PATH"
+      fi
+      ;;
+    *)
+      fail_msg "seccomp BPF path not substituted (running from unbuilt source?)"
+      ;;
+  esac
+
+  printf '=== result: %d passed, %d failed ===\n' "$checks_passed" "$checks_failed"
+  [ "$checks_failed" -eq 0 ]
+}
+
+# -----------------------------------------------------------------------------
 # Parse subcommand
 # -----------------------------------------------------------------------------
 
@@ -117,6 +219,7 @@ fi
 
 case "$1" in
   run|agent) cmd=$1; shift ;;
+  check)     run_check; exit $? ;;
   -h|--help) usage; exit 0 ;;
   *) usage >&2; die "unknown subcommand: $1" ;;
 esac
