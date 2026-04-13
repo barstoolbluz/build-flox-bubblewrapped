@@ -394,17 +394,25 @@ command -v bwrap >/dev/null 2>&1 || die "bwrap not found in PATH"
 # If --no-seccomp was passed, we skip silently.  Otherwise the file must
 # exist and be readable — a missing file in a built package is a hard error.
 if [ "$seccomp_enabled" = "1" ]; then
-  if [ "$BPF_PATH" = "@BPF_PATH@" ]; then
-    printf '%s: warning: running from unbuilt source, TIOCSTI seccomp filter not applied (use --no-seccomp to silence)\n' \
-      "$prog" >&2
-  elif [ ! -r "$BPF_PATH" ]; then
-    die "seccomp BPF not readable: $BPF_PATH (package broken?)"
-  else
-    # Open on fd 10 and pass to bwrap.  bwrap inherits non-cloexec fds,
-    # and bash's `exec N<file` form does not set cloexec by default.
-    exec 10<"$BPF_PATH"
-    args+=(--seccomp 10)
-  fi
+  # Detect substitution by shape: a real nix store path starts with "/";
+  # the unsubstituted placeholder starts with "@".  We cannot compare
+  # $BPF_PATH against the literal token "@BPF_PATH@" because that token
+  # would itself be substituted by sed during build, defeating the check.
+  case "$BPF_PATH" in
+    /*)
+      if [ ! -r "$BPF_PATH" ]; then
+        die "seccomp BPF not readable: $BPF_PATH (package broken?)"
+      fi
+      # Open on fd 10 and pass to bwrap.  bwrap inherits non-cloexec fds,
+      # and bash's `exec N<file` form does not set cloexec by default.
+      exec 10<"$BPF_PATH"
+      args+=(--seccomp 10)
+      ;;
+    *)
+      printf '%s: warning: running from unbuilt source, TIOCSTI seccomp filter not applied (use --no-seccomp to silence)\n' \
+        "$prog" >&2
+      ;;
+  esac
 fi
 
 exec bwrap "${args[@]}" -- "$@"

@@ -236,6 +236,28 @@ expect_fail \
   "$JAIL" run --project-as /workspace -- true
 
 echo
+echo "[seccomp: TIOCSTI blocked]"
+# Inside the jail, ioctl(STDIN, TIOCSTI, ...) should fail with EPERM because
+# the seccomp filter short-circuits the syscall regardless of the fd's type.
+# Without seccomp, the same call would fail with ENOTTY (stdin is not a tty
+# in the test harness).  We distinguish the two errno values explicitly.
+SECCOMP_PROBE='use Errno qw(EPERM); ioctl(STDIN, 0x5412, my $c = "x"); exit ($! == EPERM ? 0 : 1)'
+
+expect_pass \
+  "agent: seccomp blocks ioctl(TIOCSTI) with EPERM" -- \
+  "$JAIL" agent -- perl -e "$SECCOMP_PROBE"
+
+expect_pass \
+  "run: seccomp blocks ioctl(TIOCSTI) with EPERM" -- \
+  "$JAIL" run --net -- perl -e "$SECCOMP_PROBE"
+
+# Sanity check: with --no-seccomp, the ioctl fails with a different errno
+# (ENOTTY on a pipe), so the perl probe exits 1.  expect_fail → pass.
+expect_fail \
+  "agent --no-seccomp: TIOCSTI not blocked by seccomp (fails with non-EPERM errno)" -- \
+  "$JAIL" agent --no-seccomp -- perl -e "$SECCOMP_PROBE"
+
+echo
 echo "[agent mode / PATH inheritance]"
 # Agent mode should inherit host $PATH (so Flox/Nix-installed commands work).
 # Run mode should keep its minimal baseline PATH.
