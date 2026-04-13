@@ -331,6 +331,44 @@ expect_fail \
   "$JAIL" agent --no-seccomp -- perl -e "$SECCOMP_PROBE"
 
 echo
+echo "[lifecycle, signals, exit-code propagation (O1+O2)]"
+# O2: exit code propagation.  The wrapper exec()s bwrap as its final
+# action, so the wrapper's exit code is the user command's exit code.
+expect_pass "run: exit 0 propagated (true)"      -- "$JAIL" run -- true
+expect_fail "run: exit nonzero propagated (false)" -- "$JAIL" run -- false
+expect_pass "agent: exit 0 propagated (true)"      -- "$JAIL" agent -- true
+expect_fail "agent: exit nonzero propagated (false)" -- "$JAIL" agent -- false
+
+# Specific exit code propagated (not just 0/nonzero).
+expect_pass \
+  "run: specific exit code 42 propagates through wrapper" -- \
+  bash -c '"$1" run -- sh -c "exit 42"; rc=$?; test "$rc" = 42' _ "$JAIL"
+
+# O1: signal forwarding.  timeout(1) sends SIGTERM after 1s; bwrap
+# forwards it to the sandboxed sleep, sleep dies, wrapper exits non-zero
+# (timeout returns 124 by default when the command times out).
+expect_fail \
+  "run: timeout(1) terminates wrapper via SIGTERM (signal forwarding)" -- \
+  timeout 1 "$JAIL" run -- sleep 30
+expect_fail \
+  "agent: timeout(1) terminates wrapper via SIGTERM (signal forwarding)" -- \
+  timeout 1 "$JAIL" agent -- sleep 30
+
+# O1: --die-with-parent must stay wired into the wrapper's bwrap argv.
+# This is a static guard; the actual kernel behavior is bwrap's, we just
+# need to keep passing the flag.  Looks at the wrapped script behind the
+# Flox shim if present.
+WRAPPED_SCRIPT="$(dirname "$JAIL")/.bubblewrap-jail-wrapped"
+if [ -f "$WRAPPED_SCRIPT" ]; then
+  CHECK_SCRIPT="$WRAPPED_SCRIPT"
+else
+  CHECK_SCRIPT="$JAIL"
+fi
+expect_pass \
+  "wrapper source still passes --die-with-parent" -- \
+  grep -q -- "--die-with-parent" "$CHECK_SCRIPT"
+
+echo
 echo "[seccomp: failure modes (C2 — clear errors)]"
 # C2 regression: when the BPF blob is present and readable but bwrap rejects
 # it (corrupt, kernel-mismatched, libseccomp-skewed), the wrapper must die

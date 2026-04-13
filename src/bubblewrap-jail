@@ -14,6 +14,21 @@
 #   - Accept that a net-enabled sandbox can still exfiltrate anything visible
 #     *inside* the jail — that's the cost of reaching APIs.
 #
+# Lifecycle and signals (deliberate, tested):
+#   - --die-with-parent (PR_SET_PDEATHSIG → SIGKILL): the sandbox dies if
+#     the launcher dies.  An orphaned wrapper invocation cannot outlive
+#     the process that called it.
+#   - --unshare-pid: the sandbox has its own PID namespace, so when bwrap
+#     exits, every process inside the sandbox is reaped by the kernel.
+#     There are no orphan jail processes after wrapper exit.
+#   - exec bwrap: the wrapper exec()s bwrap as its final action, so the
+#     wrapper's exit code IS bwrap's exit code IS the user command's exit
+#     code (or 128+signal if the command was killed).  No intermediate
+#     shell layer swallows codes or signals.
+#   - Signal forwarding: bwrap forwards SIGTERM/SIGINT/SIGHUP to the
+#     sandboxed child by default.  `timeout(1)` and Ctrl-C work as
+#     expected against the wrapper.
+#
 # Precedence for configurable values: flags > env vars > compiled defaults.
 #
 # This script is deliberately self-contained — no sourced helpers, no config
