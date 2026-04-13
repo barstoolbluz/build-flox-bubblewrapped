@@ -1,5 +1,7 @@
 # bubblewrap-jail
 
+[![CI](https://github.com/barstoolbluz/build-flox-bubblewrapped/actions/workflows/ci.yml/badge.svg)](https://github.com/barstoolbluz/build-flox-bubblewrapped/actions/workflows/ci.yml)
+
 An opinionated [bubblewrap](https://github.com/containers/bubblewrap) wrapper
 that provides hardened sandboxes for running agents (Claude Code, etc.) and
 untrusted commands. Packaged as a [Flox](https://flox.dev) build.

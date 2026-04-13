@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # GitHub's ubuntu-24.04 image enables an AppArmor restriction that
+      # blocks unprivileged user namespace creation for binaries without
+      # an AppArmor profile.  The Nix-built bwrap we ship has no profile,
+      # so bwrap --unshare-user fails unless we relax the sysctl.
+      # This is a no-op on systems where the sysctl doesn't exist
+      # (older kernels, non-AppArmor hosts).
+      - name: Relax AppArmor unprivileged userns (Ubuntu 24.04+)
+        run: |
+          if [ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
+      - name: Install Flox
+        uses: flox/install-flox-action@v2
+
+      - name: Build bubblewrap-jail
+        run: flox build bubblewrap-jail
+
+      - name: Show build artifact + version
+        run: |
+          readlink result-bubblewrap-jail
+          ./result-bubblewrap-jail/bin/bubblewrap-jail --help | head -5
+
+      - name: Run check subcommand
+        run: |
+          ./result-bubblewrap-jail/bin/bubblewrap-jail check
+          echo "check exited 0"
+
+      - name: Run red-team test suite
+        run: flox activate -- bash test/red-team.sh
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## CI summary"
+            echo ""
+            echo "- Runner: \`ubuntu-24.04\`"
+            if [ -L result-bubblewrap-jail ]; then
+              echo "- Artifact: \`$(readlink result-bubblewrap-jail)\`"
+            fi
+            echo "- Status: ${{ job.status }}"
+          } >> "$GITHUB_STEP_SUMMARY"
