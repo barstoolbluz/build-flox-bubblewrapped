@@ -1,3 +1,8 @@
 # Flox build outputs — symlinks into /nix/store.  Not source.
 /result-*
 *.prevOutPath
+
+# Local workspace notes (Claude operational notes, volatile handoff state).
+# These live in the working tree but are not part of the project source.
+/CLAUDE.md
+/STATUS.md
