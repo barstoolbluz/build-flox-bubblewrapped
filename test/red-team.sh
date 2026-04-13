@@ -68,6 +68,23 @@ expect_stdout_matches() {
   fi
 }
 
+# Usage: expect_stderr_matches "name" "regex" -- CMD...
+#   CMD's stderr must match regex (via grep -E).  For tests that need to
+#   verify a specific error message (e.g. C2: clear seccomp failure mode).
+expect_stderr_matches() {
+  local name=$1 regex=$2; shift 2
+  [ "$1" = "--" ] && shift
+  local out
+  out=$("$@" 2>&1 >/dev/null || true)
+  if printf '%s' "$out" | grep -Eq -- "$regex"; then
+    printf '  ok:   %s\n' "$name"
+    pass=$((pass+1))
+  else
+    printf '  FAIL: %s (err=%q)\n' "$name" "$out"
+    fail=$((fail+1)); failed_tests+=("$name")
+  fi
+}
+
 # Prepare scratch cache so agent mode works without a flox activation.
 SMOKE_CACHE=$(mktemp -d)
 # shellcheck disable=SC2064
@@ -312,6 +329,58 @@ expect_pass \
 expect_fail \
   "agent --no-seccomp: TIOCSTI not blocked by seccomp (fails with non-EPERM errno)" -- \
   "$JAIL" agent --no-seccomp -- perl -e "$SECCOMP_PROBE"
+
+echo
+echo "[seccomp: failure modes (C2 — clear errors)]"
+# C2 regression: when the BPF blob is present and readable but bwrap rejects
+# it (corrupt, kernel-mismatched, libseccomp-skewed), the wrapper must die
+# with our context message, not propagate a bare bwrap stderr.  We construct
+# a corrupt BPF (100 zero bytes), copy the wrapper to a writable path, sed
+# its hardcoded BPF_PATH to point at the corrupt file, and assert.
+#
+# Subtlety: when JAIL is the result-* symlink, $JAIL is actually a tiny
+# 485-byte Flox shim that execs the real script as .bubblewrap-jail-wrapped
+# in the same dir (see CLAUDE.md).  We need the real script for the BPF_PATH
+# substitution, and we invoke it directly (not via the shim), which works
+# because the harness already has bwrap in PATH from the build env.
+#
+# Source-mode skip: when JAIL is the unbuilt source script, BPF_PATH is the
+# unsubstituted "@BPF_PATH@" placeholder.  The sed substitution would have
+# nothing meaningful to replace, so skip.
+WRAPPED_SCRIPT="$(dirname "$JAIL")/.bubblewrap-jail-wrapped"
+if [ -f "$WRAPPED_SCRIPT" ]; then
+  REAL_SCRIPT="$WRAPPED_SCRIPT"
+else
+  REAL_SCRIPT="$JAIL"
+fi
+
+if grep -q '^BPF_PATH="/' "$REAL_SCRIPT" 2>/dev/null; then
+  CORRUPT_BPF="$SMOKE_CACHE/corrupt.bpf"
+  dd if=/dev/zero of="$CORRUPT_BPF" bs=1 count=100 2>/dev/null
+  JAIL_CORRUPT="$SMOKE_CACHE/jail-corrupt"
+  cp "$REAL_SCRIPT" "$JAIL_CORRUPT"
+  chmod u+w "$JAIL_CORRUPT"
+  # Match the BPF_PATH= line and substitute the corrupt path.  The | delim
+  # avoids escaping / in store paths.
+  sed -i "s|^BPF_PATH=.*|BPF_PATH=\"$CORRUPT_BPF\"|" "$JAIL_CORRUPT"
+
+  expect_fail \
+    "agent: corrupt BPF causes wrapper to exit non-zero" -- \
+    "$JAIL_CORRUPT" agent -- true
+
+  expect_stderr_matches \
+    "agent: corrupt BPF error mentions 'rejected by bwrap' (C2 context)" \
+    "rejected by bwrap" -- \
+    "$JAIL_CORRUPT" agent -- true
+
+  # Same again with --no-seccomp, to prove the opt-out still works even when
+  # the BPF is corrupt: should NOT die at the seccomp step.
+  expect_pass \
+    "agent --no-seccomp: corrupt BPF is bypassed cleanly" -- \
+    "$JAIL_CORRUPT" agent --no-seccomp -- true
+else
+  echo "  skip: source-mode wrapper has unsubstituted BPF_PATH, C2 tests skipped"
+fi
 
 echo
 echo "[interactive pty: agent preserves controlling tty, run severs it]"

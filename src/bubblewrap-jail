@@ -559,10 +559,22 @@ command -v bwrap >/dev/null 2>&1 || die "bwrap not found in PATH"
 # closing the TTY-injection attack class without --new-session (which would
 # break interactive agent use).  See src/gen-seccomp.c for the filter.
 #
-# Precedence: if the script is running from an unbuilt source tree the BPF
-# placeholder is still "@BPF_PATH@" and we skip the filter with a warning.
-# If --no-seccomp was passed, we skip silently.  Otherwise the file must
-# exist and be readable — a missing file in a built package is a hard error.
+# Three failure modes, three handlers:
+#
+#   1. BPF_PATH placeholder unsubstituted (running from unbuilt source):
+#      print a warning, continue without the filter.
+#   2. BPF file missing or unreadable (package broken / store path nuked):
+#      die with a clear message before exec.
+#   3. BPF file present but bwrap rejects it (truncated blob, kernel ABI
+#      mismatch, libseccomp version skew): pre-flight probe in a minimal
+#      bwrap invocation, die with a clear message before the real exec.
+#
+# The pre-flight in (3) costs one extra bwrap fork (~50ms) but means the
+# user sees "seccomp BPF rejected by bwrap (...)" from this script with
+# context, instead of a bare bwrap stderr line they have to interpret
+# from a process we've already exec'd into.
+#
+# If --no-seccomp was passed, all of the above is skipped silently.
 if [ "$seccomp_enabled" = "1" ]; then
   # Detect substitution by shape: a real nix store path starts with "/";
   # the unsubstituted placeholder starts with "@".  We cannot compare
@@ -572,6 +584,16 @@ if [ "$seccomp_enabled" = "1" ]; then
     /*)
       if [ ! -r "$BPF_PATH" ]; then
         die "seccomp BPF not readable: $BPF_PATH (package broken?)"
+      fi
+      # Pre-flight: ask bwrap to load this exact blob in a throwaway
+      # sandbox before we exec the real one.  fd 11 is local to the
+      # subshell; the real exec below uses fd 10.
+      if ! bwrap --ro-bind / / --disable-userns --assert-userns-disabled \
+                 --unshare-user --unshare-pid --die-with-parent \
+                 --seccomp 11 11<"$BPF_PATH" \
+                 true 2>/dev/null
+      then
+        die "seccomp BPF rejected by bwrap: $BPF_PATH (corrupt blob, kernel mismatch, or libseccomp ABI shift?)"
       fi
       # Open on fd 10 and pass to bwrap.  bwrap inherits non-cloexec fds,
       # and bash's `exec N<file` form does not set cloexec by default.
