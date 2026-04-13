@@ -202,7 +202,11 @@ args=(
   --ro-bind-try /lib64 /lib64
   --ro-bind /nix /nix
 
-  # /etc: tmpfs with a surgical allowlist bind-mounted on top.
+  # /etc: tmpfs with a surgical allowlist bind-mounted on top.  After all
+  # binds are in place, --remount-ro makes the underlying tmpfs read-only too,
+  # so the agent cannot create arbitrary files under /etc (e.g. ld.so.preload
+  # to hijack later children).  The --ro-bind-try entries are independent
+  # mount points and remain readable regardless.
   # Critically NOT bound: shadow, sudoers, ssh, pam.d, polkit, gshadow,
   # cron.*, crontab, securetty, and anything else that could disclose host
   # secrets or grant authority.
@@ -238,6 +242,11 @@ if [ "$net" = "1" ]; then
 else
   args+=(--unshare-net)
 fi
+
+# Seal /etc: remount the tmpfs backing /etc as read-only.  This does NOT
+# recurse into the bind mounts layered on top, so the allowlist stays
+# readable while arbitrary writes under /etc fail with EROFS.
+args+=(--remount-ro /etc)
 
 # Environment: wipe, then allowlist.
 args+=(
