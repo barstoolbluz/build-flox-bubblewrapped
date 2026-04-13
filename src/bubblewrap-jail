@@ -74,6 +74,19 @@ Common options:
   --no-seccomp      Disable the default TIOCSTI-blocking seccomp filter.
                     Not recommended.  Exists for debugging and for running
                     the script from an unbuilt source tree.
+  --lock-file PATH  Pass through to bwrap: hold an exclusive flock on PATH
+                    for the lifetime of the sandbox.  PATH must already
+                    exist on the host (bwrap does not create it).  The
+                    wrapper auto-binds PATH rw into the jail at the same
+                    path so bwrap can open it.  Useful for orchestrators
+                    that want to wait for the sandbox to exit (acquire
+                    the lock once released).
+  --sync-fd FD      Pass through to bwrap: bwrap holds FD open for the
+                    lifetime of the sandbox.  When the sandbox exits, FD
+                    closes — a parent reading the other end of a pipe
+                    sees EOF and knows the sandbox is gone.  FD must
+                    already be open in the parent and inherited by the
+                    wrapper (e.g. \`$prog run --sync-fd 9 ... 9>pipe\`).
   -h, --help        This help.
 
 Agent-only options:
@@ -285,6 +298,8 @@ hostname="bubblewrap-jail"
 passthrough_env="${BUBBLEWRAP_JAIL_PASSTHROUGH_ENV:-ANTHROPIC_API_KEY}"
 passthrough_env_set_by_flag=0  # tracks --passthrough-env for run-mode rejection
 seccomp_enabled=1         # may be cleared by --no-seccomp
+lock_file=""              # --lock-file PATH passthrough (V1)
+sync_fd=""                # --sync-fd FD  passthrough (V1)
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -308,6 +323,14 @@ while [ "$#" -gt 0 ]; do
                      [ "$#" -ge 2 ] || die "--passthrough-env needs VAR"
                      passthrough_env=$2; passthrough_env_set_by_flag=1; shift 2 ;;
     --no-seccomp)    seccomp_enabled=0; shift ;;
+    --lock-file)     [ "$#" -ge 2 ] || die "--lock-file needs PATH"
+                     lock_file=$2; shift 2 ;;
+    --sync-fd)       [ "$#" -ge 2 ] || die "--sync-fd needs FD"
+                     # bwrap requires a non-negative integer file descriptor
+                     case "$2" in
+                       ''|*[!0-9]*) die "--sync-fd must be a non-negative integer: $2" ;;
+                     esac
+                     sync_fd=$2; shift 2 ;;
     -h|--help)       usage; exit 0 ;;
     --)              shift; break ;;
     -*)              usage >&2; die "unknown option: $1" ;;
@@ -558,6 +581,26 @@ while [ $i -lt ${#extra_setenv[@]} ]; do
   args+=(--setenv "${extra_setenv[i]}" "${extra_setenv[i+1]}")
   i=$((i + 2))
 done
+
+# Lifecycle / orchestration pass-throughs (V1).
+#
+#   --lock-file PATH: bwrap takes an exclusive flock on PATH for the
+#     lifetime of the sandbox.  A parent process can wait for the lock
+#     to be released to know when the sandbox exits.  bwrap opens PATH
+#     from INSIDE the jail's filesystem view (after namespace setup),
+#     so we auto-bind PATH (rw) at the same path so it's reachable.
+#     The user is responsible for creating the file on the host before
+#     invocation; bwrap will not create it.
+#
+#   --sync-fd FD: bwrap holds FD open for the lifetime of the sandbox.
+#     When the sandbox exits, the fd closes — so a parent reading the
+#     other end of a pipe sees EOF and knows the sandbox is gone.  FD
+#     must already be open in the parent and inherited by the wrapper
+#     (e.g. `bwrap-jail … --sync-fd 9 9>pipe`).
+if [ -n "$lock_file" ]; then
+  args+=(--bind "$lock_file" "$lock_file" --lock-file "$lock_file")
+fi
+[ -n "$sync_fd" ] && args+=(--sync-fd "$sync_fd")
 
 # Seal /etc: remount the tmpfs backing /etc as read-only.  This does NOT
 # recurse into the bind mounts layered on top, so the baseline allowlist

@@ -368,6 +368,79 @@ expect_pass \
   "wrapper source still passes --die-with-parent" -- \
   grep -q -- "--die-with-parent" "$CHECK_SCRIPT"
 
+# O2: missing /nix should not break the wrapper.  The wrapper uses
+# --ro-bind-try (not --ro-bind) for /nix, which silently no-ops on
+# hosts where /nix is absent.  We can't easily simulate "missing /nix"
+# from a Nix host, so this is a static guard against accidentally
+# changing --ro-bind-try /nix to --ro-bind /nix.
+expect_pass \
+  "wrapper uses --ro-bind-try /nix (graceful when /nix absent)" -- \
+  grep -q -- "--ro-bind-try /nix" "$CHECK_SCRIPT"
+
+echo
+echo "[V1: --lock-file and --sync-fd pass-through]"
+# V1: --lock-file ↔ bwrap takes a POSIX advisory READ (shared) lock via
+# fcntl(2) on the file for the lifetime of the sandbox.  Note: bwrap uses
+# fcntl POSIX locks, NOT flock(2), so flock(1) won't see them — we have
+# to inspect /proc/locks directly, matching by the file's inode number.
+# /proc/locks format: "ID: TYPE FLAGS RW PID MAJ:MIN:INODE START END".
+expect_pass \
+  "run: --lock-file holds a POSIX advisory lock during sandbox" -- \
+  bash -c '
+    LOCK="$2/v1-lock-test"
+    : >"$LOCK"
+    "$1" run --lock-file "$LOCK" -- sleep 1 &
+    JAIL_PID=$!
+    sleep 0.3
+    INODE=$(stat -c %i "$LOCK")
+    locked=0
+    grep -q ":$INODE " /proc/locks && locked=1
+    wait $JAIL_PID
+    [ $locked = 1 ]
+  ' _ "$JAIL" "$SMOKE_CACHE"
+
+expect_pass \
+  "run: --lock-file lock released after sandbox exits" -- \
+  bash -c '
+    LOCK="$2/v1-lock-released-test"
+    : >"$LOCK"
+    "$1" run --lock-file "$LOCK" -- true
+    INODE=$(stat -c %i "$LOCK")
+    ! grep -q ":$INODE " /proc/locks
+  ' _ "$JAIL" "$SMOKE_CACHE"
+
+# V1: --sync-fd ↔ bwrap holds the inherited fd open for the lifetime of
+# the sandbox; when the sandbox exits the fd closes.  Test via a pipe:
+# parent reads from the read end, wrapper inherits the write end via
+# fd 9; once the wrapper exits, the read end sees EOF and `cat` returns 0.
+# If --sync-fd weren't honored, the read end would still see EOF (because
+# the wrapper exits anyway), so we add a sleep on the write side and
+# check that the read genuinely BLOCKED until exit, not returned early.
+expect_pass \
+  "run: --sync-fd holds fd open for sandbox lifetime, closes at exit" -- \
+  bash -c '
+    PIPE="$2/v1-sync-pipe"
+    rm -f "$PIPE"
+    mkfifo "$PIPE"
+    # Start the reader: it should block on the FIFO until the wrapper exits.
+    ( timeout 5 cat "$PIPE" >/dev/null; echo $? > "$PIPE.rc" ) &
+    READER=$!
+    # Wrapper holds fd 9 → pipe write end via --sync-fd; sleep 0.3s before
+    # exiting so we can prove the reader was actually blocked, not racing.
+    "$1" run --sync-fd 9 -- sleep 0.3 9>"$PIPE"
+    wait $READER
+    rc=$(cat "$PIPE.rc" 2>/dev/null || echo timeout)
+    test "$rc" = 0
+  ' _ "$JAIL" "$SMOKE_CACHE"
+
+# V1: --sync-fd validation — must be a non-negative integer.
+expect_fail \
+  "run: --sync-fd rejects non-numeric value" -- \
+  "$JAIL" run --sync-fd abc -- true
+expect_fail \
+  "run: --sync-fd rejects empty value" -- \
+  "$JAIL" run --sync-fd "" -- true
+
 echo
 echo "[seccomp: failure modes (C2 — clear errors)]"
 # C2 regression: when the BPF blob is present and readable but bwrap rejects
