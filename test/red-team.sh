@@ -562,10 +562,13 @@ echo "[V1: --lock-file and --sync-fd pass-through]"
 # daemons holding locks under /run).  Matching just ":$INODE " would
 # false-positive on those collisions.
 #
-# For MAJ:MIN, /proc/locks prints them as 2-hex-digit fields via
-# old_encode_dev — major = dev/256, minor = dev%256 when dev fits
-# in 16 bits.  That's always true for tmpfs (where our test files
-# live), so the simple arithmetic is safe here.
+# For MAJ:MIN, /proc/locks prints the kernel-internal major/minor as
+# 2-hex-digit fields (%02x:%02x, which expands past 2 digits for
+# major > 255 — as seen on nvme).  The naive decoding
+# `major = dev/256, minor = dev%256` is correct only when minor < 256,
+# because it otherwise loses the high bits of minor.  For tmpfs (where
+# our mktemp test files live), minor is always a small sequential
+# integer (< 256 in practice), so the simple arithmetic is safe here.
 expect_pass \
   "run: --lock-file holds a POSIX advisory lock during sandbox" -- \
   bash -c '
