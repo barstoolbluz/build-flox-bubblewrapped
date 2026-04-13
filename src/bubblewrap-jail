@@ -48,7 +48,9 @@ Common options:
 
 Agent-only options:
   --project DIR     Project dir to bind rw.
-                    Default: \$FLOX_ENV_PROJECT or \$PWD.
+                    Default: \$BUBBLEWRAP_JAIL_PROJECT or \$PWD.
+                    (\$FLOX_ENV_PROJECT is NOT used as a fallback; it points at
+                    the tool env when layered, which is almost never correct.)
   --agent-home DIR  Persistent agent HOME.
                     Default: \$FLOX_ENV_CACHE/agent-home, else
                     \${XDG_CACHE_HOME:-\$HOME/.cache}/bubblewrap-jail/agent-home.
@@ -156,8 +158,14 @@ case "$net" in
 esac
 
 if [ "$cmd" = "agent" ]; then
+  # Project dir precedence: --project flag > BUBBLEWRAP_JAIL_PROJECT > $PWD.
+  # We deliberately do NOT fall back to $FLOX_ENV_PROJECT: when this tool is
+  # layered onto a different working directory via `flox activate -d`,
+  # $FLOX_ENV_PROJECT points at the tool env itself, which is virtually never
+  # what a user wants as the jailed project.  $PWD matches the user's intent
+  # ("sandbox the thing I'm standing in").
   if [ -z "$project" ]; then
-    project="${BUBBLEWRAP_JAIL_PROJECT:-${FLOX_ENV_PROJECT:-$PWD}}"
+    project="${BUBBLEWRAP_JAIL_PROJECT:-$PWD}"
   fi
   [ -d "$project" ] || die "project dir not a directory: $project"
   project=$(cd "$project" && pwd -P)
