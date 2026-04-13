@@ -1,0 +1,308 @@
+#!/usr/bin/env bash
+#
+# bubblewrap-jail — opinionated bubblewrap wrapper with secure defaults.
+#
+# Subcommands:
+#   run     Jail a command.  Minimal fs view, no project binding, no secrets.
+#   agent   Jail an agent.   Project dir rw, persistent agent home, API key
+#           passthrough.  Defaults to --net.
+#
+# Threat model (v1): prompt-injection defense.
+#   - Agent/command is buggy or steerable but not actively malicious.
+#   - Must not be able to read SSH keys, GPG keys, cloud creds, or arbitrary
+#     $HOME/* paths outside a small allowlist.
+#   - Accept that a net-enabled sandbox can still exfiltrate anything visible
+#     *inside* the jail — that's the cost of reaching APIs.
+#
+# Precedence for configurable values: flags > env vars > compiled defaults.
+#
+# This script is deliberately self-contained — no sourced helpers, no config
+# files, no external state.  Audit by reading this one file.
+
+set -euo pipefail
+
+prog=$(basename "$0")
+
+err() { printf '%s: %s\n' "$prog" "$*" >&2; }
+die() { err "$*"; exit 1; }
+
+usage() {
+  cat <<EOF
+Usage: $prog <subcommand> [options] -- CMD [ARGS...]
+
+Subcommands:
+  run       Jail a command.  Minimal filesystem view, no project binding.
+  agent     Jail an agent.   Project dir rw, persistent agent home.
+
+Common options:
+  --net             Enable network (adds TLS certs, DNS, hosts).
+  --no-net          Disable network.
+  --bind DST SRC    Additional rw bind mount (may repeat).
+  --ro-bind DST SRC Additional ro bind mount (may repeat).
+  --setenv K V      Allowlist additional environment variable (may repeat).
+  --hostname NAME   Sandbox hostname (default: bubblewrap-jail).
+  -h, --help        This help.
+
+Agent-only options:
+  --project DIR     Project dir to bind rw.
+                    Default: \$FLOX_ENV_PROJECT or \$PWD.
+  --agent-home DIR  Persistent agent HOME.
+                    Default: \$FLOX_ENV_CACHE/agent-home, else
+                    \${XDG_CACHE_HOME:-\$HOME/.cache}/bubblewrap-jail/agent-home.
+  --api-key-env VAR Name of env var holding API key to pass through.
+                    Default: ANTHROPIC_API_KEY.
+
+Environment variables (used as defaults; flags override):
+  BUBBLEWRAP_JAIL_NET         0|1    (default: 0 for run, 1 for agent)
+  BUBBLEWRAP_JAIL_PROJECT     path   (default project dir, agent only)
+  BUBBLEWRAP_JAIL_HOME        path   (default agent home, agent only)
+  BUBBLEWRAP_JAIL_API_KEY_ENV name   (default: ANTHROPIC_API_KEY)
+
+Defaults (v1):
+  run mode:   net off; HOME=/tmp; cwd=/tmp; no project binding.
+  agent mode: net on;  HOME=<agent-home>; cwd=<project>; API key passed
+              through if set on host; host ~/.gitconfig ro-bound if present.
+
+In both modes, the following are NEVER visible inside the jail:
+  ~/.ssh  ~/.gnupg  ~/.aws  ~/.config
+  /etc/shadow  /etc/ssh  /etc/sudoers
+  any \$HOME/* path not explicitly allowlisted
+EOF
+}
+
+command -v bwrap >/dev/null 2>&1 || die "bwrap not found in PATH"
+
+# -----------------------------------------------------------------------------
+# Parse subcommand
+# -----------------------------------------------------------------------------
+
+if [ "$#" -lt 1 ]; then
+  usage >&2
+  die "missing subcommand"
+fi
+
+case "$1" in
+  run|agent) cmd=$1; shift ;;
+  -h|--help) usage; exit 0 ;;
+  *) usage >&2; die "unknown subcommand: $1" ;;
+esac
+
+# -----------------------------------------------------------------------------
+# Parse options
+# -----------------------------------------------------------------------------
+
+net=""                    # "" = use subcommand default
+project=""
+agent_home=""
+extra_bind=()
+extra_ro_bind=()
+extra_setenv=()
+hostname="bubblewrap-jail"
+api_key_env="${BUBBLEWRAP_JAIL_API_KEY_ENV:-ANTHROPIC_API_KEY}"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --net)           net=1; shift ;;
+    --no-net)        net=0; shift ;;
+    --bind)          [ "$#" -ge 3 ] || die "--bind needs DST SRC"
+                     extra_bind+=("$2" "$3"); shift 3 ;;
+    --ro-bind)       [ "$#" -ge 3 ] || die "--ro-bind needs DST SRC"
+                     extra_ro_bind+=("$2" "$3"); shift 3 ;;
+    --setenv)        [ "$#" -ge 3 ] || die "--setenv needs K V"
+                     extra_setenv+=("$2" "$3"); shift 3 ;;
+    --hostname)      [ "$#" -ge 2 ] || die "--hostname needs NAME"
+                     hostname=$2; shift 2 ;;
+    --project)       [ "$#" -ge 2 ] || die "--project needs DIR"
+                     project=$2; shift 2 ;;
+    --agent-home)    [ "$#" -ge 2 ] || die "--agent-home needs DIR"
+                     agent_home=$2; shift 2 ;;
+    --api-key-env)   [ "$#" -ge 2 ] || die "--api-key-env needs VAR"
+                     api_key_env=$2; shift 2 ;;
+    -h|--help)       usage; exit 0 ;;
+    --)              shift; break ;;
+    -*)              usage >&2; die "unknown option: $1" ;;
+    *)               break ;;
+  esac
+done
+
+[ "$#" -ge 1 ] || die "no command given"
+
+# Reject agent-only flags in run mode so misuse is noisy, not silent.
+if [ "$cmd" = "run" ]; then
+  [ -z "$project"    ] || die "--project is agent-only"
+  [ -z "$agent_home" ] || die "--agent-home is agent-only"
+fi
+
+# -----------------------------------------------------------------------------
+# Resolve defaults
+# -----------------------------------------------------------------------------
+
+if [ -z "$net" ]; then
+  if [ -n "${BUBBLEWRAP_JAIL_NET:-}" ]; then
+    net=$BUBBLEWRAP_JAIL_NET
+  elif [ "$cmd" = "agent" ]; then
+    net=1
+  else
+    net=0
+  fi
+fi
+
+case "$net" in
+  0|1) ;;
+  *)   die "invalid net value: $net (expected 0 or 1)" ;;
+esac
+
+if [ "$cmd" = "agent" ]; then
+  if [ -z "$project" ]; then
+    project="${BUBBLEWRAP_JAIL_PROJECT:-${FLOX_ENV_PROJECT:-$PWD}}"
+  fi
+  [ -d "$project" ] || die "project dir not a directory: $project"
+  project=$(cd "$project" && pwd -P)
+
+  if [ -z "$agent_home" ]; then
+    if [ -n "${BUBBLEWRAP_JAIL_HOME:-}" ]; then
+      agent_home=$BUBBLEWRAP_JAIL_HOME
+    elif [ -n "${FLOX_ENV_CACHE:-}" ]; then
+      agent_home="$FLOX_ENV_CACHE/agent-home"
+    else
+      agent_home="${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/bubblewrap-jail/agent-home"
+    fi
+  fi
+  mkdir -p "$agent_home"
+  agent_home=$(cd "$agent_home" && pwd -P)
+fi
+
+# -----------------------------------------------------------------------------
+# Build bwrap argument list
+# -----------------------------------------------------------------------------
+
+args=(
+  # Namespaces.  Unshare everything except net (net is handled separately).
+  --unshare-user
+  --unshare-ipc
+  --unshare-pid
+  --unshare-uts
+  --unshare-cgroup-try
+
+  # Prevent nested user namespaces from inside the sandbox, and refuse to
+  # start if the kernel can't enforce that.  Closes the door behind us.
+  --disable-userns
+  --assert-userns-disabled
+
+  # Lifecycle.  Die with parent so no orphaned sandboxed processes.
+  --die-with-parent
+
+  --hostname "$hostname"
+
+  # Filesystem skeleton (read-only).
+  --ro-bind /usr /usr
+  --ro-bind /bin /bin
+  --ro-bind-try /sbin /sbin
+  --ro-bind-try /lib  /lib
+  --ro-bind-try /lib64 /lib64
+  --ro-bind /nix /nix
+
+  # /etc: tmpfs with a surgical allowlist bind-mounted on top.
+  # Critically NOT bound: shadow, sudoers, ssh, pam.d, polkit, gshadow,
+  # cron.*, crontab, securetty, and anything else that could disclose host
+  # secrets or grant authority.
+  --tmpfs /etc
+  --ro-bind-try /etc/ld.so.cache    /etc/ld.so.cache
+  --ro-bind-try /etc/ld.so.conf     /etc/ld.so.conf
+  --ro-bind-try /etc/ld.so.conf.d   /etc/ld.so.conf.d
+  --ro-bind-try /etc/nsswitch.conf  /etc/nsswitch.conf
+  --ro-bind-try /etc/alternatives   /etc/alternatives
+  --ro-bind-try /etc/passwd         /etc/passwd
+  --ro-bind-try /etc/group          /etc/group
+  --ro-bind-try /etc/host.conf      /etc/host.conf
+  --ro-bind-try /etc/localtime      /etc/localtime
+
+  # Minimal /proc and /dev, scratch tmpfs mounts.
+  --proc /proc
+  --dev /dev
+  --tmpfs /tmp
+  --tmpfs /var/tmp
+  --tmpfs /run
+)
+
+# Network policy.
+if [ "$net" = "1" ]; then
+  # Inherit parent net ns (no --unshare-net).
+  args+=(
+    --ro-bind-try /etc/resolv.conf      /etc/resolv.conf
+    --ro-bind-try /etc/hosts            /etc/hosts
+    --ro-bind-try /etc/ssl              /etc/ssl
+    --ro-bind-try /etc/ca-certificates  /etc/ca-certificates
+    --ro-bind-try /etc/pki              /etc/pki
+  )
+else
+  args+=(--unshare-net)
+fi
+
+# Environment: wipe, then allowlist.
+args+=(
+  --clearenv
+  --setenv PATH "/usr/bin:/bin:/usr/sbin:/sbin"
+  --setenv TERM "${TERM:-dumb}"
+  --setenv LANG "${LANG:-C.UTF-8}"
+)
+
+# Mode-specific bindings.
+if [ "$cmd" = "agent" ]; then
+  args+=(
+    --bind "$project"    "$project"
+    --bind "$agent_home" "$agent_home"
+    --setenv HOME "$agent_home"
+    --setenv TMPDIR "/tmp"
+    --chdir "$project"
+  )
+
+  # Pass host ~/.gitconfig ro, if present — convenience for git-using agents.
+  # Rejected: ~/.git-credentials, ~/.netrc (auth material).
+  if [ -n "${HOME:-}" ] && [ -f "$HOME/.gitconfig" ]; then
+    args+=(--ro-bind "$HOME/.gitconfig" "$agent_home/.gitconfig")
+  fi
+
+  # Pass through API key if host has it set.  Indirect expansion via printenv
+  # avoids bash's ${!name} which shellcheck flags.
+  api_key_val=$(printenv -- "$api_key_env" 2>/dev/null || true)
+  if [ -n "$api_key_val" ]; then
+    args+=(--setenv "$api_key_env" "$api_key_val")
+  fi
+  unset api_key_val
+
+  # NOTE: we deliberately do NOT pass --new-session in agent mode.  It calls
+  # setsid() and detaches from the controlling tty, which breaks interactive
+  # CLIs like Claude Code.  The TIOCSTI class of attack is mitigated on modern
+  # kernels (>=5.17) via dev.tty.legacy_tiocsti_restrict.  If you run on an
+  # older kernel and care, add --new-session manually via the caller.
+else
+  # run mode: neutral HOME, scratch cwd, new session (no interactive tty needs).
+  args+=(
+    --setenv HOME "/tmp"
+    --setenv TMPDIR "/tmp"
+    --chdir /tmp
+    --new-session
+  )
+fi
+
+# User-supplied extras appended last so they can override earlier setenvs.
+i=0
+while [ $i -lt ${#extra_bind[@]} ]; do
+  args+=(--bind "${extra_bind[i]}" "${extra_bind[i+1]}")
+  i=$((i + 2))
+done
+
+i=0
+while [ $i -lt ${#extra_ro_bind[@]} ]; do
+  args+=(--ro-bind "${extra_ro_bind[i]}" "${extra_ro_bind[i+1]}")
+  i=$((i + 2))
+done
+
+i=0
+while [ $i -lt ${#extra_setenv[@]} ]; do
+  args+=(--setenv "${extra_setenv[i]}" "${extra_setenv[i+1]}")
+  i=$((i + 2))
+done
+
+exec bwrap "${args[@]}" -- "$@"

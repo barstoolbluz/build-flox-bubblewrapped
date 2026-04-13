@@ -1,0 +1,246 @@
+{
+  "lockfile-version": 1,
+  "manifest": {
+    "schema-version": "1.11.0",
+    "install": {
+      "bashInteractive": {
+        "pkg-path": "bashInteractive"
+      },
+      "bubblewrap": {
+        "pkg-path": "bubblewrap",
+        "systems": [
+          "x86_64-linux",
+          "aarch64-linux"
+        ]
+      },
+      "shellcheck": {
+        "pkg-path": "shellcheck"
+      }
+    },
+    "options": {
+      "systems": [
+        "x86_64-linux",
+        "aarch64-linux"
+      ]
+    },
+    "build": {
+      "bubblewrap-jail": {
+        "command": "  shellcheck --severity=style --shell=bash src/bubblewrap-jail\n  install -Dm755 src/bubblewrap-jail $out/bin/bubblewrap-jail\n",
+        "runtime-packages": [
+          "bubblewrap"
+        ],
+        "sandbox": "pure",
+        "version": "0.1.0",
+        "description": "Opinionated bubblewrap wrapper: run/agent subcommands, secure-by-default defaults"
+      }
+    }
+  },
+  "packages": [
+    {
+      "attr_path": "bashInteractive",
+      "broken": false,
+      "derivation": "/nix/store/8fls0a7akkjr6dkndxyrsrxkbmjdmykm-bash-interactive-5.3p9.drv",
+      "description": "GNU Bourne-Again Shell, the de facto standard shell on Linux (for interactive use)",
+      "install_id": "bashInteractive",
+      "license": "GPL-3.0-or-later",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=4c1018dae018162ec878d42fec712642d214fdfa",
+      "name": "bash-interactive-5.3p9",
+      "pname": "bashInteractive",
+      "rev": "4c1018dae018162ec878d42fec712642d214fdfa",
+      "rev_count": 977467,
+      "rev_date": "2026-04-09T04:48:10Z",
+      "scrape_date": "2026-04-11T06:34:58.541231Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "5.3p9",
+      "outputs_to_install": [
+        "man",
+        "out",
+        "out",
+        "out"
+      ],
+      "outputs": {
+        "debug": "/nix/store/zyi5m4r7wma9vvvfzg7r99avh8sxg9m1-bash-interactive-5.3p9-debug",
+        "dev": "/nix/store/hkmlf3zy6brfn3xr3magif6c54ln3z4c-bash-interactive-5.3p9-dev",
+        "doc": "/nix/store/l7bcjyprsmzdnrimjg8al47wsr4vsy6q-bash-interactive-5.3p9-doc",
+        "info": "/nix/store/cad8ahawmbf12gvh0bq7sf9rjjwbfzg9-bash-interactive-5.3p9-info",
+        "man": "/nix/store/87ljrnbjn8w6iqf3bzirh6wd7lpmhvzp-bash-interactive-5.3p9-man",
+        "out": "/nix/store/f6lsdzsgbh5mxaaa91gykyi8mqmlzpr2-bash-interactive-5.3p9"
+      },
+      "system": "aarch64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "bashInteractive",
+      "broken": false,
+      "derivation": "/nix/store/s9b1a2zhv6l7x8ady5vfbj5kg8rkvznx-bash-interactive-5.3p9.drv",
+      "description": "GNU Bourne-Again Shell, the de facto standard shell on Linux (for interactive use)",
+      "install_id": "bashInteractive",
+      "license": "GPL-3.0-or-later",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=4c1018dae018162ec878d42fec712642d214fdfa",
+      "name": "bash-interactive-5.3p9",
+      "pname": "bashInteractive",
+      "rev": "4c1018dae018162ec878d42fec712642d214fdfa",
+      "rev_count": 977467,
+      "rev_date": "2026-04-09T04:48:10Z",
+      "scrape_date": "2026-04-11T07:39:12.615262Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "5.3p9",
+      "outputs_to_install": [
+        "man",
+        "out",
+        "out",
+        "out"
+      ],
+      "outputs": {
+        "debug": "/nix/store/h979dcfkxhswbsdqcwqbzynaqnz1n5a0-bash-interactive-5.3p9-debug",
+        "dev": "/nix/store/832yrsfhq3z41zn9rqsvv0cv22mblv4c-bash-interactive-5.3p9-dev",
+        "doc": "/nix/store/fy5pa2zv8g7l3v0nn6rpwib8nl4whdx1-bash-interactive-5.3p9-doc",
+        "info": "/nix/store/p9lkzmrvl0wqjs4mjv87h5lqcypgrzbp-bash-interactive-5.3p9-info",
+        "man": "/nix/store/lw0v8hggdjsqs9zpwwrxajcc4rbsmlfq-bash-interactive-5.3p9-man",
+        "out": "/nix/store/sfvyavxai6qvzmv9p9x6mp4wwdz4v41m-bash-interactive-5.3p9"
+      },
+      "system": "x86_64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "bubblewrap",
+      "broken": false,
+      "derivation": "/nix/store/29dd6l0kb8s83yvsc1jx11iyh3pbk331-bubblewrap-0.11.0.drv",
+      "description": "Unprivileged sandboxing tool",
+      "install_id": "bubblewrap",
+      "license": "LGPL-2.0-or-later",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=4c1018dae018162ec878d42fec712642d214fdfa",
+      "name": "bubblewrap-0.11.0",
+      "pname": "bubblewrap",
+      "rev": "4c1018dae018162ec878d42fec712642d214fdfa",
+      "rev_count": 977467,
+      "rev_date": "2026-04-09T04:48:10Z",
+      "scrape_date": "2026-04-11T06:34:58.638839Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "0.11.0",
+      "outputs_to_install": [
+        "out",
+        "out",
+        "out"
+      ],
+      "outputs": {
+        "dev": "/nix/store/gahfj90ml6hq5pbzdfy6wnsqy7klgnkh-bubblewrap-0.11.0-dev",
+        "out": "/nix/store/kkpr0gfmv4x9g9lgd7d8qxlyibwnlxb3-bubblewrap-0.11.0"
+      },
+      "system": "aarch64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "bubblewrap",
+      "broken": false,
+      "derivation": "/nix/store/9vyldkqz22sjxjmdr3rx976fq50rpbjf-bubblewrap-0.11.0.drv",
+      "description": "Unprivileged sandboxing tool",
+      "install_id": "bubblewrap",
+      "license": "LGPL-2.0-or-later",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=4c1018dae018162ec878d42fec712642d214fdfa",
+      "name": "bubblewrap-0.11.0",
+      "pname": "bubblewrap",
+      "rev": "4c1018dae018162ec878d42fec712642d214fdfa",
+      "rev_count": 977467,
+      "rev_date": "2026-04-09T04:48:10Z",
+      "scrape_date": "2026-04-11T07:39:12.786654Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "0.11.0",
+      "outputs_to_install": [
+        "out",
+        "out",
+        "out"
+      ],
+      "outputs": {
+        "dev": "/nix/store/5cra9hjwqr0970rcpyjfv8d946wby4xs-bubblewrap-0.11.0-dev",
+        "out": "/nix/store/gr9l6ql3wg70idpqlqhnfdx81hak22c8-bubblewrap-0.11.0"
+      },
+      "system": "x86_64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "shellcheck",
+      "broken": false,
+      "derivation": "/nix/store/dmplwdwisp5hipyskcgq9fjlrxcvfqnj-shellcheck-0.11.0.drv",
+      "description": "Shell script analysis tool",
+      "install_id": "shellcheck",
+      "license": "GPL-3.0-only",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=4c1018dae018162ec878d42fec712642d214fdfa",
+      "name": "shellcheck-0.11.0",
+      "pname": "shellcheck",
+      "rev": "4c1018dae018162ec878d42fec712642d214fdfa",
+      "rev_count": 977467,
+      "rev_date": "2026-04-09T04:48:10Z",
+      "scrape_date": "2026-04-11T06:37:18.717486Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "0.11.0",
+      "outputs_to_install": [
+        "bin",
+        "doc",
+        "man"
+      ],
+      "outputs": {
+        "bin": "/nix/store/bk0vqy5k73b33pw1v14h36ggryw58xv7-shellcheck-0.11.0-bin",
+        "doc": "/nix/store/m0wpbhrx3530lxxf97agz29zgm3gshrd-shellcheck-0.11.0-doc",
+        "man": "/nix/store/ak8np2nraqbca7aswb196dqs668ihsry-shellcheck-0.11.0-man",
+        "out": "/nix/store/ghcxwch9q3fazz3mz9rbrsyzq422jfyc-shellcheck-0.11.0"
+      },
+      "system": "aarch64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "shellcheck",
+      "broken": false,
+      "derivation": "/nix/store/rf1yiv12fh2r6b8n46s0fj27rmnar8nv-shellcheck-0.11.0.drv",
+      "description": "Shell script analysis tool",
+      "install_id": "shellcheck",
+      "license": "GPL-3.0-only",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=4c1018dae018162ec878d42fec712642d214fdfa",
+      "name": "shellcheck-0.11.0",
+      "pname": "shellcheck",
+      "rev": "4c1018dae018162ec878d42fec712642d214fdfa",
+      "rev_count": 977467,
+      "rev_date": "2026-04-09T04:48:10Z",
+      "scrape_date": "2026-04-11T07:41:41.045078Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "0.11.0",
+      "outputs_to_install": [
+        "bin",
+        "doc",
+        "man"
+      ],
+      "outputs": {
+        "bin": "/nix/store/iszqxdn46psh4crvly6zp7wrp00p3lw5-shellcheck-0.11.0-bin",
+        "doc": "/nix/store/h1ggss2gsrd5xq1yi45ww56yab1lzsif-shellcheck-0.11.0-doc",
+        "man": "/nix/store/srqizsdkqrly5idxqb06qhx6x9fm9r6s-shellcheck-0.11.0-man",
+        "out": "/nix/store/mjdmyvxyv3pvk542rz8a3bcjm0q1rysx-shellcheck-0.11.0"
+      },
+      "system": "x86_64-linux",
+      "group": "toplevel",
+      "priority": 5
+    }
+  ]
+}

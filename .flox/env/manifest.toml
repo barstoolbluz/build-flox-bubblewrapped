@@ -1,0 +1,20 @@
+schema-version = "1.11.0"
+
+[install]
+bubblewrap.pkg-path = "bubblewrap"
+bubblewrap.systems = ["x86_64-linux", "aarch64-linux"]
+shellcheck.pkg-path = "shellcheck"
+bashInteractive.pkg-path = "bashInteractive"
+
+[build.bubblewrap-jail]
+version = "0.1.0"
+description = "Opinionated bubblewrap wrapper: run/agent subcommands, secure-by-default defaults"
+sandbox = "pure"
+runtime-packages = ["bubblewrap"]
+command = '''
+  shellcheck --severity=style --shell=bash src/bubblewrap-jail
+  install -Dm755 src/bubblewrap-jail $out/bin/bubblewrap-jail
+'''
+
+[options]
+systems = ["x86_64-linux", "aarch64-linux"]
