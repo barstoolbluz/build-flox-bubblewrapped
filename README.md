@@ -88,6 +88,12 @@ The build:
 The runtime closure contains only `bubblewrap` — no shellcheck, gcc,
 libseccomp-dev, or pkg-config leakage.
 
+For audit, the package also ships a human-readable dump of the seccomp
+filter at `$out/share/bubblewrap-jail/tiocsti.pfc` (libseccomp's "pseudo
+filter code" representation). Read it directly to see exactly what
+syscalls/arguments the filter affects, without needing libseccomp
+tooling on the inspecting host.
+
 ## Installing into a consumer Flox environment
 
 Until this is published to a Flox catalog, install via store-path pin:

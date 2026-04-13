@@ -155,25 +155,26 @@ Status legend:
 
 ## Execution status
 
-Maintained in this section as work lands. Cross-reference commit hashes
-when items move to `[DONE]`.
+All roadmap items shipped between v0.2.5 and v0.3.2. **Done.**
 
 | # | Item | Status | Lands in |
 |---|------|--------|----------|
 | C1 | Full bwrap flag probe in `check` | DONE | v0.2.3, v0.2.4 |
-| C2 | Clear seccomp failure modes | PARTIAL | v0.2.0 (missing/unreadable); rejected-case TODO |
+| C2 | Clear seccomp failure modes | DONE | v0.2.5 (rejected-case pre-flight) |
 | C3 | `--die-with-parent` | DONE | v0.1.0 |
 | S1 | Scope docs | DONE | v0.2.3 |
 | S2 | TIOCSTI seccomp in agent | DONE | v0.2.0 |
 | S3 | Stale sysctl comment | DONE | v0.2.3 |
-| O1 | Lifecycle / signal handling | TODO | — |
-| O2 | Missing-/nix, missing-BPF, exit-code tests | PARTIAL | v0.2.1+ has 5/8 |
-| V1 | `--lock-file` / `--sync-fd` | TODO | — |
+| O1 | Lifecycle / signal handling | DONE | v0.2.6 |
+| O2 | Missing-/nix, missing-BPF, exit-code tests | DONE | v0.2.5, v0.2.6, v0.2.7 |
+| V1 | `--lock-file` / `--sync-fd` | DONE | v0.2.7 |
 | B1 | Keep `gen-seccomp.c` | DONE | v0.2.0 |
-| B2 | Human-readable BPF (PFC) | TODO | — |
-| E1 | Multi-var passthrough allowlist | TODO | — |
+| B2 | Human-readable BPF (PFC) | DONE | v0.3.2 |
+| E1 | Multi-var passthrough allowlist | DONE | v0.3.0 |
 | E2 | `--clearenv` base | DONE | v0.1.0 |
-| E3 | Document injected env table | PARTIAL | help mentions inline; needs a table |
-| F1 | `--project-ro` mode | TODO | — |
-| F2 | Reserved-mountpoint guard on user binds | TODO | — |
-| F3 | Mount ordering docs | PARTIAL | scattered comments; needs a single section |
+| E3 | Document injected env table | DONE | v0.3.0 |
+| F1 | `--project-ro` mode | DONE | v0.3.1 |
+| F2 | Reserved-mountpoint guard on user binds | DONE | v0.3.1 |
+| F3 | Mount ordering docs | DONE | v0.3.1 |
+
+Final state: red-team **110 / 0**, check **29 / 0**, runtime closure 35 paths.

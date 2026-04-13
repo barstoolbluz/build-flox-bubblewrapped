@@ -33,11 +33,33 @@
 
 #include <errno.h>
 #include <stdio.h>
+#include <string.h>
 #include <sys/ioctl.h>
 
 #include <seccomp.h>
 
-int main(void) {
+static void usage_to(FILE *f) {
+    fprintf(f, "usage: gen-seccomp [--pfc]\n");
+    fprintf(f, "  (default)  emit raw BPF blob to stdout (kernel-consumable)\n");
+    fprintf(f, "  --pfc      emit pseudo filter code to stdout (human-readable)\n");
+}
+
+int main(int argc, char **argv) {
+    int emit_pfc = 0;
+
+    if (argc > 1) {
+        if (strcmp(argv[1], "--pfc") == 0) {
+            emit_pfc = 1;
+        } else if (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0) {
+            usage_to(stdout);
+            return 0;
+        } else {
+            fprintf(stderr, "gen-seccomp: unknown argument: %s\n", argv[1]);
+            usage_to(stderr);
+            return 4;
+        }
+    }
+
     /* Default action: allow everything. */
     scmp_filter_ctx ctx = seccomp_init(SCMP_ACT_ALLOW);
     if (!ctx) {
@@ -59,12 +81,23 @@ int main(void) {
         return 2;
     }
 
-    /* Emit the BPF program on stdout (fd 1). */
-    rc = seccomp_export_bpf(ctx, 1);
-    if (rc < 0) {
-        fprintf(stderr, "gen-seccomp: seccomp_export_bpf failed: %d\n", rc);
-        seccomp_release(ctx);
-        return 3;
+    /* Emit either kernel BPF (default) or human-readable PFC on stdout.
+     * PFC is libseccomp's "pseudo filter code" — a textual representation
+     * of the filter for review/audit, written via seccomp_export_pfc(). */
+    if (emit_pfc) {
+        rc = seccomp_export_pfc(ctx, 1);
+        if (rc < 0) {
+            fprintf(stderr, "gen-seccomp: seccomp_export_pfc failed: %d\n", rc);
+            seccomp_release(ctx);
+            return 3;
+        }
+    } else {
+        rc = seccomp_export_bpf(ctx, 1);
+        if (rc < 0) {
+            fprintf(stderr, "gen-seccomp: seccomp_export_bpf failed: %d\n", rc);
+            seccomp_release(ctx);
+            return 3;
+        }
     }
 
     seccomp_release(ctx);

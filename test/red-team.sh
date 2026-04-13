@@ -462,6 +462,29 @@ expect_pass \
   grep -q -- "--ro-bind-try /nix" "$CHECK_SCRIPT"
 
 echo
+echo "[B2: human-readable PFC dump shipped alongside BPF blob]"
+# B2: the build runs `gen-seccomp --pfc > tiocsti.pfc` and installs the
+# result alongside tiocsti.bpf for human review.  Verify it's present
+# and references the ioctl syscall (proves it's a real filter dump,
+# not an empty file).  Skip in source mode (no installed package).
+if [ -f "$WRAPPED_SCRIPT" ]; then
+  PFC_FILE="$(dirname "$(dirname "$WRAPPED_SCRIPT")")/share/bubblewrap-jail/tiocsti.pfc"
+  expect_pass \
+    "B2: PFC dump shipped at share/bubblewrap-jail/tiocsti.pfc" -- \
+    test -r "$PFC_FILE"
+  expect_stdout_matches \
+    "B2: PFC dump references ioctl syscall" \
+    "ioctl" -- \
+    cat "$PFC_FILE"
+  expect_stdout_matches \
+    "B2: PFC dump references ERRNO action (the EPERM rule)" \
+    "ERRNO" -- \
+    cat "$PFC_FILE"
+else
+  echo "  skip: source-mode wrapper has no installed PFC, B2 tests skipped"
+fi
+
+echo
 echo "[V1: --lock-file and --sync-fd pass-through]"
 # V1: --lock-file ↔ bwrap takes a POSIX advisory READ (shared) lock via
 # fcntl(2) on the file for the lifetime of the sandbox.  Note: bwrap uses

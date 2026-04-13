@@ -12,7 +12,7 @@ gcc.pkg-path = "gcc"
 perl.pkg-path = "perl"
 
 [build.bubblewrap-jail]
-version = "0.3.1"
+version = "0.3.2"
 description = "Opinionated bubblewrap wrapper: run/agent subcommands, secure-by-default defaults"
 sandbox = "pure"
 runtime-packages = ["bubblewrap"]
@@ -37,8 +37,19 @@ command = '''
     exit 1
   fi
 
+  # Generate the human-readable PFC dump (B2).  This is purely for
+  # review/audit — the wrapper doesn't read it at runtime — but shipping
+  # it alongside tiocsti.bpf gives an auditor a one-cat view of what the
+  # filter actually does without needing libseccomp tooling.
+  ./gen-seccomp --pfc > tiocsti.pfc
+  if [ ! -s tiocsti.pfc ]; then
+    echo "gen-seccomp --pfc produced empty output" >&2
+    exit 1
+  fi
+
   # Install artifacts.
   install -Dm644 tiocsti.bpf         $out/share/bubblewrap-jail/tiocsti.bpf
+  install -Dm644 tiocsti.pfc         $out/share/bubblewrap-jail/tiocsti.pfc
   install -Dm755 src/bubblewrap-jail $out/bin/bubblewrap-jail
 
   # Substitute the final BPF path into the installed script.  The | delimiter
