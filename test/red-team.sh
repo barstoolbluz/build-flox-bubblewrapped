@@ -672,6 +672,27 @@ expect_fail \
   "run: --info-fd rejects empty value" -- \
   "$JAIL" run --info-fd "" -- true
 
+# F1: fd 10 and 11 are reserved internally for the seccomp BPF (fd 10
+# held across `exec bwrap`; fd 11 used transiently by the C2 pre-flight
+# probe).  Reject user attempts to pass them as --sync-fd or --info-fd
+# to prevent silent collision with the wrapper's own `exec 10<`.
+expect_fail \
+  "run: --sync-fd rejects fd 10 (reserved for seccomp BPF)" -- \
+  "$JAIL" run --sync-fd 10 -- true
+expect_fail \
+  "run: --sync-fd rejects fd 11 (reserved for seccomp BPF)" -- \
+  "$JAIL" run --sync-fd 11 -- true
+expect_fail \
+  "run: --info-fd rejects fd 10 (reserved for seccomp BPF)" -- \
+  "$JAIL" run --info-fd 10 -- true
+expect_fail \
+  "run: --info-fd rejects fd 11 (reserved for seccomp BPF)" -- \
+  "$JAIL" run --info-fd 11 -- true
+expect_stderr_matches \
+  "run: --sync-fd 10 error message mentions 'reserved'" \
+  "reserved" -- \
+  "$JAIL" run --sync-fd 10 -- true
+
 # A4: --lock-file pre-validates that the host path exists.
 expect_fail \
   "run: --lock-file nonexistent host path rejected by wrapper" -- \
