@@ -77,14 +77,17 @@ Agent-only options:
   --agent-home DIR  Persistent agent HOME.
                     Default: \$FLOX_ENV_CACHE/agent-home, else
                     \${XDG_CACHE_HOME:-\$HOME/.cache}/bubblewrap-jail/agent-home.
-  --api-key-env VAR Name of env var holding API key to pass through.
-                    Default: ANTHROPIC_API_KEY.
+  --passthrough-env VAR
+                    Name of a host env var to pass through into the jail.
+                    Default: ANTHROPIC_API_KEY.  Reserved names that the
+                    jail manages itself (PATH, HOME, TMPDIR, TERM, LANG,
+                    PWD) are rejected.
 
 Environment variables (used as defaults; flags override):
-  BUBBLEWRAP_JAIL_NET         0|1    (default: 0 for run, 1 for agent)
-  BUBBLEWRAP_JAIL_PROJECT     path   (default project dir, agent only)
-  BUBBLEWRAP_JAIL_HOME        path   (default agent home, agent only)
-  BUBBLEWRAP_JAIL_API_KEY_ENV name   (default: ANTHROPIC_API_KEY)
+  BUBBLEWRAP_JAIL_NET             0|1    (default: 0 for run, 1 for agent)
+  BUBBLEWRAP_JAIL_PROJECT         path   (default project dir, agent only)
+  BUBBLEWRAP_JAIL_HOME            path   (default agent home, agent only)
+  BUBBLEWRAP_JAIL_PASSTHROUGH_ENV name   (default: ANTHROPIC_API_KEY)
 
 Defaults:
   run mode:   net off; HOME=/tmp; cwd=/tmp; no project binding.
@@ -236,7 +239,7 @@ extra_bind=()
 extra_ro_bind=()
 extra_setenv=()
 hostname="bubblewrap-jail"
-api_key_env="${BUBBLEWRAP_JAIL_API_KEY_ENV:-ANTHROPIC_API_KEY}"
+passthrough_env="${BUBBLEWRAP_JAIL_PASSTHROUGH_ENV:-ANTHROPIC_API_KEY}"
 seccomp_enabled=1         # may be cleared by --no-seccomp
 
 while [ "$#" -gt 0 ]; do
@@ -257,8 +260,9 @@ while [ "$#" -gt 0 ]; do
                      project_as=$2; shift 2 ;;
     --agent-home)    [ "$#" -ge 2 ] || die "--agent-home needs DIR"
                      agent_home=$2; shift 2 ;;
-    --api-key-env)   [ "$#" -ge 2 ] || die "--api-key-env needs VAR"
-                     api_key_env=$2; shift 2 ;;
+    --passthrough-env)
+                     [ "$#" -ge 2 ] || die "--passthrough-env needs VAR"
+                     passthrough_env=$2; shift 2 ;;
     --no-seccomp)    seccomp_enabled=0; shift ;;
     -h|--help)       usage; exit 0 ;;
     --)              shift; break ;;
@@ -268,6 +272,15 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ "$#" -ge 1 ] || die "no command given"
+
+# Reject reserved env-var names that the jail manages itself.  Allowing
+# these to be passthrough'd would override the jail's own baseline (e.g.
+# --passthrough-env HOME would replace the jail HOME with the host HOME),
+# defeating isolation.  This catches both the flag and the env-var default.
+case "$passthrough_env" in
+  PATH|HOME|TMPDIR|TERM|LANG|PWD)
+    die "--passthrough-env may not be a reserved name: $passthrough_env" ;;
+esac
 
 # Reject agent-only flags in run mode so misuse is noisy, not silent.
 if [ "$cmd" = "run" ]; then
@@ -318,6 +331,18 @@ if [ "$cmd" = "agent" ]; then
     case "$project_as" in
       /*) ;;
       *)  die "--project-as must be an absolute path: $project_as" ;;
+    esac
+    # Refuse to bind on top of FHS-essential paths.  bwrap will happily
+    # shadow /bin or /usr with the project dir and then exec inside the
+    # sandbox fails ("No such file or directory") because /bin/sh is gone.
+    # Footgun, not a security boundary — but loud is better than silent.
+    case "$project_as" in
+      / | /bin | /sbin | /usr | /lib | /lib64 | /etc | /proc | /dev \
+        | /tmp | /var | /run | /nix | /root | /home)
+        die "--project-as cannot shadow essential directory: $project_as" ;;
+      /bin/* | /sbin/* | /usr/* | /lib/* | /lib64/* | /etc/* \
+        | /proc/* | /dev/* | /nix/*)
+        die "--project-as cannot be under essential directory: $project_as" ;;
     esac
   fi
 
@@ -405,11 +430,6 @@ else
   args+=(--unshare-net)
 fi
 
-# Seal /etc: remount the tmpfs backing /etc as read-only.  This does NOT
-# recurse into the bind mounts layered on top, so the allowlist stays
-# readable while arbitrary writes under /etc fail with EROFS.
-args+=(--remount-ro /etc)
-
 # Environment: wipe, then allowlist.
 args+=(
   --clearenv
@@ -442,19 +462,21 @@ if [ "$cmd" = "agent" ]; then
     args+=(--ro-bind "$HOME/.gitconfig" "$agent_home/.gitconfig")
   fi
 
-  # Pass through API key if host has it set.  Indirect expansion via printenv
-  # avoids bash's ${!name} which shellcheck flags.
-  api_key_val=$(printenv -- "$api_key_env" 2>/dev/null || true)
-  if [ -n "$api_key_val" ]; then
-    args+=(--setenv "$api_key_env" "$api_key_val")
+  # Pass through the named env var if the host has it set.
+  passthrough_val=${!passthrough_env:-}
+  if [ -n "$passthrough_val" ]; then
+    args+=(--setenv "$passthrough_env" "$passthrough_val")
   fi
-  unset api_key_val
+  unset passthrough_val
 
   # NOTE: we deliberately do NOT pass --new-session in agent mode.  It calls
   # setsid() and detaches from the controlling tty, which breaks interactive
-  # CLIs like Claude Code.  The TIOCSTI class of attack is mitigated on modern
-  # kernels (>=5.17) via dev.tty.legacy_tiocsti_restrict.  If you run on an
-  # older kernel and care, add --new-session manually via the caller.
+  # CLIs like Claude Code.  The TIOCSTI class of attack is instead mitigated
+  # by the seccomp BPF filter loaded below (see gen-seccomp.c), which blocks
+  # ioctl(_, TIOCSTI, _) with EPERM regardless of kernel version.  On kernels
+  # >=5.17 the dev.tty.legacy_tiocsti_restrict sysctl provides a redundant
+  # belt-and-braces; if --no-seccomp is passed, that sysctl becomes the only
+  # defense, so don't disable seccomp on older kernels.
 else
   # run mode: neutral HOME, scratch cwd, new session (no interactive tty needs).
   args+=(
@@ -483,6 +505,13 @@ while [ $i -lt ${#extra_setenv[@]} ]; do
   args+=(--setenv "${extra_setenv[i]}" "${extra_setenv[i+1]}")
   i=$((i + 2))
 done
+
+# Seal /etc: remount the tmpfs backing /etc as read-only.  This does NOT
+# recurse into the bind mounts layered on top, so the baseline allowlist
+# stays readable.  Placed AFTER the user --bind / --ro-bind loops so that
+# user binds into /etc create their mount points before the parent tmpfs
+# turns read-only — bwrap can't mkdir a mount point on a ro filesystem.
+args+=(--remount-ro /etc)
 
 # Dependency check lives here (not at the top) so --help and early arg errors
 # work even when bwrap isn't installed.
