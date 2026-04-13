@@ -107,11 +107,21 @@ export ANTHROPIC_API_KEY="sk-canary-anthropic-value"
 # `timeout 3` caps the wait: getent respects its own per-nameserver
 # timeout (up to ~15s on a dead resolver), which is way too long for
 # a pre-check.
-if timeout 3 getent ahosts example.com >/dev/null 2>&1; then
-  HOST_DNS_WORKS=1
-else
-  HOST_DNS_WORKS=0
-  echo "[harness pre-check] cannot resolve example.com; positive DNS tests will skip"
+#
+# Retry up to 3 times — a single-shot pre-check is itself vulnerable
+# to transient packet loss and would cause a spurious skip on an
+# otherwise-healthy network.
+HOST_DNS_WORKS=0
+for _host_dns_attempt in 1 2 3; do
+  if timeout 3 getent ahosts example.com >/dev/null 2>&1; then
+    HOST_DNS_WORKS=1
+    break
+  fi
+  [ "$_host_dns_attempt" -lt 3 ] && sleep 0.3
+done
+unset _host_dns_attempt
+if [ "$HOST_DNS_WORKS" = 0 ]; then
+  echo "[harness pre-check] cannot resolve example.com after 3 tries; positive DNS tests will skip"
 fi
 
 # Retry a positive-DNS test inside the jail up to 3 times with short
@@ -119,12 +129,15 @@ fi
 # Usage:
 #   _jail_dns_retry "$JAIL" run --net
 #   _jail_dns_retry "$JAIL" agent
+#
+# shellcheck disable=SC2329  # invoked indirectly via `expect_pass ... -- _jail_dns_retry ...`
 _jail_dns_retry() {
   local jail=$1; shift
   local attempt
   for attempt in 1 2 3; do
     "$jail" "$@" -- timeout 3 getent ahosts example.com >/dev/null 2>&1 && return 0
-    sleep 0.3
+    # No sleep after the last attempt — we're about to return failure.
+    [ "$attempt" -lt 3 ] && sleep 0.3
   done
   return 1
 }
@@ -538,10 +551,21 @@ fi
 echo
 echo "[V1: --lock-file and --sync-fd pass-through]"
 # V1: --lock-file ↔ bwrap takes a POSIX advisory READ (shared) lock via
-# fcntl(2) on the file for the lifetime of the sandbox.  Note: bwrap uses
-# fcntl POSIX locks, NOT flock(2), so flock(1) won't see them — we have
-# to inspect /proc/locks directly, matching by the file's inode number.
+# fcntl(2) on the file for the lifetime of the sandbox.  We inspect
+# /proc/locks directly because bwrap uses fcntl POSIX locks (NOT flock(2)),
+# so flock(1) cannot see them at all.
+#
 # /proc/locks format: "ID: TYPE FLAGS RW PID MAJ:MIN:INODE START END".
+# Field 6 (MAJ:MIN:INODE) is what uniquely identifies a locked file —
+# NOT the inode alone, because inode numbers are per-filesystem and
+# can collide with unrelated locks on other devices (e.g. system
+# daemons holding locks under /run).  Matching just ":$INODE " would
+# false-positive on those collisions.
+#
+# For MAJ:MIN, /proc/locks prints them as 2-hex-digit fields via
+# old_encode_dev — major = dev/256, minor = dev%256 when dev fits
+# in 16 bits.  That's always true for tmpfs (where our test files
+# live), so the simple arithmetic is safe here.
 expect_pass \
   "run: --lock-file holds a POSIX advisory lock during sandbox" -- \
   bash -c '
@@ -550,9 +574,18 @@ expect_pass \
     "$1" run --lock-file "$LOCK" -- sleep 1 &
     JAIL_PID=$!
     sleep 0.3
+    # Build the full MAJ:MIN:INODE pattern from stat and look for an
+    # exact field-6 match in /proc/locks.
+    DEV=$(stat -c %d "$LOCK")
     INODE=$(stat -c %i "$LOCK")
+    EXPECTED=$(printf "%02x:%02x:%s" "$(( DEV / 256 ))" "$(( DEV % 256 ))" "$INODE")
     locked=0
-    grep -q ":$INODE " /proc/locks && locked=1
+    while read -r -a f; do
+      if [ "${f[5]:-}" = "$EXPECTED" ]; then
+        locked=1
+        break
+      fi
+    done < /proc/locks
     wait $JAIL_PID
     [ $locked = 1 ]
   ' _ "$JAIL" "$SMOKE_CACHE"
@@ -563,8 +596,17 @@ expect_pass \
     LOCK="$2/v1-lock-released-test"
     : >"$LOCK"
     "$1" run --lock-file "$LOCK" -- true
+    DEV=$(stat -c %d "$LOCK")
     INODE=$(stat -c %i "$LOCK")
-    ! grep -q ":$INODE " /proc/locks
+    EXPECTED=$(printf "%02x:%02x:%s" "$(( DEV / 256 ))" "$(( DEV % 256 ))" "$INODE")
+    # Exact MAJ:MIN:INODE match on field 6 — inode-only match would
+    # false-positive on collisions with other filesystems.
+    while read -r -a f; do
+      if [ "${f[5]:-}" = "$EXPECTED" ]; then
+        exit 1
+      fi
+    done < /proc/locks
+    exit 0
   ' _ "$JAIL" "$SMOKE_CACHE"
 
 # V1: --sync-fd ↔ bwrap holds the inherited fd open for the lifetime of

@@ -782,8 +782,10 @@ command -v bwrap >/dev/null 2>&1 || die "bwrap not found in PATH"
 if [ "$seccomp_enabled" = "1" ]; then
   # Detect substitution by shape: a real nix store path starts with "/";
   # the unsubstituted placeholder starts with "@".  We cannot compare
-  # $BPF_PATH against the literal token "@BPF_PATH@" because that token
-  # would itself be substituted by sed during build, defeating the check.
+  # $BPF_PATH against the unsubstituted placeholder as a literal string
+  # because sed's global replace in the build step would rewrite any
+  # copy of that placeholder in this file — including a copy here in
+  # the code that's checking for it — defeating the check.
   case "$BPF_PATH" in
     /*)
       if [ ! -r "$BPF_PATH" ]; then
