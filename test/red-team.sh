@@ -255,6 +255,52 @@ expect_stdout_matches \
   env MY_TOKEN=canary-passthrough \
     "$JAIL" agent --passthrough-env MY_TOKEN -- sh -c 'printenv MY_TOKEN'
 
+# E1: --passthrough-env is repeatable; multiple flags allowlist multiple vars.
+expect_stdout_matches \
+  "agent: --passthrough-env repeatable (var A reaches jail)" \
+  "^val-A\$" -- \
+  env CANARY_A=val-A CANARY_B=val-B \
+    "$JAIL" agent --passthrough-env CANARY_A --passthrough-env CANARY_B \
+    -- sh -c 'printenv CANARY_A'
+expect_stdout_matches \
+  "agent: --passthrough-env repeatable (var B reaches jail)" \
+  "^val-B\$" -- \
+  env CANARY_A=val-A CANARY_B=val-B \
+    "$JAIL" agent --passthrough-env CANARY_A --passthrough-env CANARY_B \
+    -- sh -c 'printenv CANARY_B'
+
+# E1: BUBBLEWRAP_JAIL_PASSTHROUGH_ENV accepts comma-separated list.
+expect_stdout_matches \
+  "agent: BUBBLEWRAP_JAIL_PASSTHROUGH_ENV CSV (var A reaches jail)" \
+  "^csv-A\$" -- \
+  env CANARY_A=csv-A CANARY_B=csv-B \
+      BUBBLEWRAP_JAIL_PASSTHROUGH_ENV=CANARY_A,CANARY_B \
+    "$JAIL" agent -- sh -c 'printenv CANARY_A'
+expect_stdout_matches \
+  "agent: BUBBLEWRAP_JAIL_PASSTHROUGH_ENV CSV (var B reaches jail)" \
+  "^csv-B\$" -- \
+  env CANARY_A=csv-A CANARY_B=csv-B \
+      BUBBLEWRAP_JAIL_PASSTHROUGH_ENV=CANARY_A,CANARY_B \
+    "$JAIL" agent -- sh -c 'printenv CANARY_B'
+
+# E1: reserved-name check applies per-entry — second entry HOME is rejected.
+expect_fail \
+  "agent: --passthrough-env reserved name in 2nd position rejected" -- \
+  "$JAIL" agent --passthrough-env CANARY_A --passthrough-env HOME -- true
+
+# E1: reserved-name check applies to env-var-supplied list too.
+expect_fail \
+  "agent: BUBBLEWRAP_JAIL_PASSTHROUGH_ENV CSV with reserved name rejected" -- \
+  bash -c 'BUBBLEWRAP_JAIL_PASSTHROUGH_ENV=CANARY_A,HOME "$1" agent -- true' _ "$JAIL"
+
+# E1: trailing/double commas in env var CSV are tolerated (empty entries skipped).
+expect_stdout_matches \
+  "agent: BUBBLEWRAP_JAIL_PASSTHROUGH_ENV CSV tolerates empty entries" \
+  "^tolerated\$" -- \
+  env CANARY_A=tolerated \
+      BUBBLEWRAP_JAIL_PASSTHROUGH_ENV=,,CANARY_A,, \
+    "$JAIL" agent -- sh -c 'printenv CANARY_A'
+
 # B4 regression: --project-as / and --project-as /bin are rejected.
 expect_fail \
   "agent: --project-as rejects shadowing /" -- \

@@ -106,15 +106,21 @@ Agent-only options:
                     \${XDG_CACHE_HOME:-\$HOME/.cache}/bubblewrap-jail/agent-home.
   --passthrough-env VAR
                     Name of a host env var to pass through into the jail.
-                    Default: ANTHROPIC_API_KEY.  Reserved names that the
-                    jail manages itself (PATH, HOME, TMPDIR, TERM, LANG,
-                    PWD) are rejected.
+                    Repeatable: pass multiple times to allowlist multiple
+                    vars.  Each var is set inside the jail only if the
+                    host has it set; unset vars are silently skipped.
+                    Default (when no --passthrough-env is given): the
+                    BUBBLEWRAP_JAIL_PASSTHROUGH_ENV env var (comma-
+                    separated list, e.g. \"A,B,C\") or ANTHROPIC_API_KEY.
+                    Reserved names that the jail manages itself (PATH,
+                    HOME, TMPDIR, TERM, LANG, PWD) are rejected per-entry.
 
 Environment variables (used as defaults; flags override):
   BUBBLEWRAP_JAIL_NET             0|1    (default: 0 for run, 1 for agent)
   BUBBLEWRAP_JAIL_PROJECT         path   (default project dir, agent only)
   BUBBLEWRAP_JAIL_HOME            path   (default agent home, agent only)
-  BUBBLEWRAP_JAIL_PASSTHROUGH_ENV name   (default: ANTHROPIC_API_KEY)
+  BUBBLEWRAP_JAIL_PASSTHROUGH_ENV csv    (default: ANTHROPIC_API_KEY;
+                                          comma-separated for multi-var)
 
 Defaults:
   run mode:   net off; HOME=/tmp; cwd=/tmp; no project binding.
@@ -122,6 +128,24 @@ Defaults:
               cwd=<project> (or <project-as> if --project-as is set);
               host \$PATH inherited; API key passed through if set on host;
               host ~/.gitconfig ro-bound if present.
+
+Environment in jail (everything is --clearenv'd, then explicitly added):
+  Both modes always set:
+    PATH    /usr/bin:/bin:/usr/sbin:/sbin
+    TERM    inherited from host (default \"dumb\")
+    LANG    inherited from host (default \"C.UTF-8\")
+  run mode also sets:
+    HOME    /tmp
+    TMPDIR  /tmp
+    (cwd:   /tmp; --new-session, no controlling tty)
+  agent mode also sets:
+    HOME    <agent-home>
+    TMPDIR  /tmp
+    PATH    overridden with host \$PATH (so Flox/Nix tools resolve)
+    (cwd:   <project> or <project-as>; controlling tty preserved)
+    each var named by --passthrough-env that's set on the host
+  Plus any --setenv K V the user passed (run or agent), applied last so
+  user --setenv wins.
 
 Not mounted by default (i.e. hidden from the jail unless you explicitly
 re-expose them with --bind / --ro-bind):
@@ -295,8 +319,8 @@ extra_bind=()
 extra_ro_bind=()
 extra_setenv=()
 hostname="bubblewrap-jail"
-passthrough_env="${BUBBLEWRAP_JAIL_PASSTHROUGH_ENV:-ANTHROPIC_API_KEY}"
-passthrough_env_set_by_flag=0  # tracks --passthrough-env for run-mode rejection
+passthrough_envs=()       # list of env var names to pass through (E1)
+passthrough_envs_set_by_flag=0  # tracks --passthrough-env for run-mode rejection
 seccomp_enabled=1         # may be cleared by --no-seccomp
 lock_file=""              # --lock-file PATH passthrough (V1)
 sync_fd=""                # --sync-fd FD  passthrough (V1)
@@ -321,7 +345,10 @@ while [ "$#" -gt 0 ]; do
                      agent_home=$2; shift 2 ;;
     --passthrough-env)
                      [ "$#" -ge 2 ] || die "--passthrough-env needs VAR"
-                     passthrough_env=$2; passthrough_env_set_by_flag=1; shift 2 ;;
+                     # Repeatable: each occurrence appends one var name.
+                     passthrough_envs+=("$2")
+                     passthrough_envs_set_by_flag=1
+                     shift 2 ;;
     --no-seccomp)    seccomp_enabled=0; shift ;;
     --lock-file)     [ "$#" -ge 2 ] || die "--lock-file needs PATH"
                      lock_file=$2; shift 2 ;;
@@ -340,24 +367,36 @@ done
 
 [ "$#" -ge 1 ] || die "no command given"
 
+# If no --passthrough-env flag was passed, seed the list from the env var
+# default (comma-separated for multi-var support) or the compiled default.
+# Empty entries from leading/trailing/double commas are stripped at use time.
+if [ "$passthrough_envs_set_by_flag" = 0 ]; then
+  IFS=',' read -ra passthrough_envs <<<"${BUBBLEWRAP_JAIL_PASSTHROUGH_ENV:-ANTHROPIC_API_KEY}"
+fi
+
 # Reject reserved env-var names that the jail manages itself.  Allowing
 # these to be passthrough'd would override the jail's own baseline (e.g.
 # --passthrough-env HOME would replace the jail HOME with the host HOME),
-# defeating isolation.  This catches both the flag and the env-var default.
-case "$passthrough_env" in
-  PATH|HOME|TMPDIR|TERM|LANG|PWD)
-    die "--passthrough-env may not be a reserved name: $passthrough_env" ;;
-esac
+# defeating isolation.  Applied per-entry so each item in the list is
+# checked independently — both flag-supplied and env-var-supplied.
+for _pte in "${passthrough_envs[@]}"; do
+  case "$_pte" in
+    '')        continue ;;  # skip empty entries from "A,,B" or trailing comma
+    PATH|HOME|TMPDIR|TERM|LANG|PWD)
+               die "--passthrough-env may not be a reserved name: $_pte" ;;
+  esac
+done
+unset _pte
 
 # Reject agent-only flags in run mode so misuse is noisy, not silent.
-# --passthrough-env needs its own tracking boolean because passthrough_env
+# --passthrough-env needs its own tracking boolean because passthrough_envs
 # always has a non-empty default, so we can't distinguish "user set it" from
-# "default applied" by emptiness.
+# "default applied" by array emptiness.
 if [ "$cmd" = "run" ]; then
   [ -z "$project"    ] || die "--project is agent-only"
   [ -z "$project_as" ] || die "--project-as is agent-only"
   [ -z "$agent_home" ] || die "--agent-home is agent-only"
-  [ "$passthrough_env_set_by_flag" = 0 ] || die "--passthrough-env is agent-only"
+  [ "$passthrough_envs_set_by_flag" = 0 ] || die "--passthrough-env is agent-only"
 fi
 
 # -----------------------------------------------------------------------------
@@ -533,12 +572,18 @@ if [ "$cmd" = "agent" ]; then
     args+=(--ro-bind "$HOME/.gitconfig" "$agent_home/.gitconfig")
   fi
 
-  # Pass through the named env var if the host has it set.
-  passthrough_val=${!passthrough_env:-}
-  if [ -n "$passthrough_val" ]; then
-    args+=(--setenv "$passthrough_env" "$passthrough_val")
-  fi
-  unset passthrough_val
+  # Pass through each named env var if the host has it set.  Unset vars
+  # are silently skipped (no --setenv emitted), so the jail sees only the
+  # vars actually present on the host.  The reserved-name check above
+  # already rejected anything that would override the jail baseline.
+  for _pte in "${passthrough_envs[@]}"; do
+    [ -z "$_pte" ] && continue
+    _pte_val=${!_pte:-}
+    if [ -n "$_pte_val" ]; then
+      args+=(--setenv "$_pte" "$_pte_val")
+    fi
+  done
+  unset _pte _pte_val
 
   # NOTE: we deliberately do NOT pass --new-session in agent mode.  It calls
   # setsid() and detaches from the controlling tty, which breaks interactive
