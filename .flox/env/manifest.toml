@@ -16,7 +16,7 @@ perl.pkg-path = "perl"
 jq.pkg-path = "jq"
 
 [build.bubblewrap-jail]
-version = "0.4.6"
+version = "0.4.7"
 description = "Opinionated bubblewrap wrapper: run/agent subcommands, secure-by-default defaults"
 sandbox = "pure"
 runtime-packages = ["bubblewrap"]

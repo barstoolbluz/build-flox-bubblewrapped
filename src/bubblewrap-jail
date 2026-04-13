@@ -216,12 +216,21 @@ Mount ordering (bwrap applies operations in argv order; later wins):
 
 run_check() {
   # Parse check-specific flags.  --json switches to machine-readable
-  # output; default is human-readable text.
+  # output; default is human-readable text.  -h/--help prints the full
+  # usage (same as the top-level subcommand dispatcher) and exits 0, so
+  # `bubblewrap-jail check --help` works as users expect.
+  #
+  # The unknown-option die message deliberately does NOT prefix with
+  # "check:" — the err() helper already prefixes "bubblewrap-jail:",
+  # and adding a subcommand label here would be inconsistent with the
+  # rest of the wrapper's error messages (and would say "check:" even
+  # when called via the `doctor` alias, which is wrong).
   local output_format=text
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --json) output_format=json; shift ;;
-      *)      die "check: unknown option: $1" ;;
+      --json)    output_format=json; shift ;;
+      -h|--help) usage; exit 0 ;;
+      *)         die "unknown option: $1" ;;
     esac
   done
 
@@ -311,18 +320,26 @@ run_check() {
     printf '{\n'
     printf '  "schema": "bubblewrap-jail-check/1",\n'
     printf '  "wrapper_version": %s,\n' "$(_json_str "$VERSION")"
-    printf '  "probes": [\n'
-    for ((i=0; i<n; i++)); do
-      printf '    {"name": %s, "status": %s}' \
-        "$(_json_str "${probe_names[i]}")" \
-        "$(_json_str "${probe_statuses[i]}")"
-      if [ "$i" -lt "$((n-1))" ]; then
-        printf ',\n'
-      else
-        printf '\n'
-      fi
-    done
-    printf '  ],\n'
+    # Empty-probes case is unreachable in current usage (every code
+    # path records at least one probe), but emit the short form `[]`
+    # defensively so an empty emitter call produces clean JSON instead
+    # of `[\n  ]`.
+    if [ "$n" -eq 0 ]; then
+      printf '  "probes": [],\n'
+    else
+      printf '  "probes": [\n'
+      for ((i=0; i<n; i++)); do
+        printf '    {"name": %s, "status": %s}' \
+          "$(_json_str "${probe_names[i]}")" \
+          "$(_json_str "${probe_statuses[i]}")"
+        if [ "$i" -lt "$((n-1))" ]; then
+          printf ',\n'
+        else
+          printf '\n'
+        fi
+      done
+      printf '  ],\n'
+    fi
     printf '  "summary": {\n'
     printf '    "passed": %d,\n'        "$checks_passed"
     printf '    "failed": %d,\n'        "$checks_failed"

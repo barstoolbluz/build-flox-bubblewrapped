@@ -888,6 +888,37 @@ expect_pass \
   "doctor: text output matches check text output exactly" -- \
   bash -c 'diff <("$1" check 2>&1) <("$1" doctor 2>&1) >/dev/null' _ "$JAIL"
 
+# T1 (v0.4.7): `check --help` / `check -h` / `doctor --help` should print
+# usage and exit 0, not error with "unknown option".
+expect_stdout_matches \
+  "check --help prints the subcommands section" \
+  "Subcommands:" -- \
+  "$JAIL" check --help
+expect_pass \
+  "check -h exits 0" -- \
+  "$JAIL" check -h
+expect_pass \
+  "doctor --help exits 0" -- \
+  "$JAIL" doctor --help
+
+# V1 (v0.4.7): unknown-option error messages no longer prefixed with
+# "check:" — the bubblewrap-jail: prefix from err() already identifies
+# the tool, so an extra "check:" label is redundant and wrong when
+# called via the doctor alias.
+expect_stderr_matches \
+  "doctor --bogus error mentions 'unknown option'" \
+  "unknown option" -- \
+  "$JAIL" doctor --bogus
+expect_pass \
+  "doctor --bogus error does not say 'check:' (V1 regression guard)" -- \
+  bash -c '
+    err=$("$1" doctor --bogus 2>&1 >/dev/null)
+    case "$err" in
+      *check:*) exit 1 ;;
+      *)        exit 0 ;;
+    esac
+  ' _ "$JAIL"
+
 # Probe-split: check subcommand should emit OPT lines for optional features
 # (--lock-file, --sync-fd, --info-fd).  At least one OPT line required.
 expect_pass \
