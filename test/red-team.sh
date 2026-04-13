@@ -693,6 +693,24 @@ expect_stderr_matches \
   "reserved" -- \
   "$JAIL" run --sync-fd 10 -- true
 
+# F1 leading-zero bypass: v0.4.2 used a literal `case 10|11)` which
+# matched "10"/"11" as strings, so "010" snuck through.  v0.4.3 switches
+# to arithmetic `[ -eq ]` comparison which treats digit strings as
+# decimal (bash test-builtin: "010" == 10).  These regressions pin the
+# fix.
+expect_fail \
+  "run: --sync-fd rejects '010' (leading-zero variant of fd 10)" -- \
+  "$JAIL" run --sync-fd 010 -- true
+expect_fail \
+  "run: --sync-fd rejects '00000010' (multiple leading zeros to fd 10)" -- \
+  "$JAIL" run --sync-fd 00000010 -- true
+expect_fail \
+  "run: --info-fd rejects '011' (leading-zero variant of fd 11)" -- \
+  "$JAIL" run --info-fd 011 -- true
+expect_fail \
+  "run: --info-fd rejects '000011'" -- \
+  "$JAIL" run --info-fd 000011 -- true
+
 # A4: --lock-file pre-validates that the host path exists.
 expect_fail \
   "run: --lock-file nonexistent host path rejected by wrapper" -- \

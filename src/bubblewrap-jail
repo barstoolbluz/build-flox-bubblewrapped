@@ -433,23 +433,44 @@ while [ "$#" -gt 0 ]; do
                      [ -e "$2" ] || die "--lock-file path does not exist: $2 (create it first; bwrap will not)"
                      lock_file=$2; shift 2 ;;
     --sync-fd)       [ "$#" -ge 2 ] || die "--sync-fd needs FD"
-                     # bwrap requires a non-negative integer fd.  We also
-                     # reject 10 and 11 because the wrapper reserves those
-                     # for the seccomp BPF (fd 10 is held across exec
-                     # bwrap; fd 11 is used transiently by the pre-flight
-                     # probe).  Accepting them would silently clobber the
-                     # seccomp fd via bash's `exec 10<` below.
+                     # bwrap requires a non-negative integer fd.
                      case "$2" in
                        ''|*[!0-9]*) die "--sync-fd must be a non-negative integer: $2" ;;
-                       10|11)       die "--sync-fd cannot be 10 or 11 (reserved by wrapper for seccomp BPF)" ;;
                      esac
+                     # Reject fd 10 and 11 — the wrapper reserves those
+                     # for the seccomp BPF (fd 10 is held across exec
+                     # bwrap; fd 11 is used transiently by the C2
+                     # pre-flight probe).  Accepting them would silently
+                     # clobber the seccomp fd via `exec 10<` below.
+                     #
+                     # CRITICAL: use `[ -eq ]` (test-builtin arithmetic),
+                     # NOT `$(( ))` arithmetic expansion.  `$(( 010 ))`
+                     # evaluates to 8 because `$(( ))` follows C octal
+                     # rules; `[ "010" -eq 10 ]` is TRUE because bash's
+                     # test-builtin parses digit strings as decimal.
+                     # Writing this as `$(( $2 )) -eq 10` would silently
+                     # accept `--sync-fd 010` — the exact bug v0.4.3
+                     # fixes.  If you "simplify" this to arithmetic
+                     # expansion, add a test for `--sync-fd 010` and
+                     # watch it fail.
+                     #
+                     # 2>/dev/null suppresses bash's overflow warning on
+                     # pathological inputs (20+ digit numbers).  Those
+                     # can't be 10 or 11 anyway, and bwrap will reject
+                     # them at runtime as out-of-range.
+                     if [ "$2" -eq 10 ] 2>/dev/null || [ "$2" -eq 11 ] 2>/dev/null; then
+                       die "--sync-fd cannot be 10 or 11 (reserved by wrapper for seccomp BPF)"
+                     fi
                      sync_fd=$2; shift 2 ;;
     --info-fd)       [ "$#" -ge 2 ] || die "--info-fd needs FD"
-                     # Same fd 10/11 reservation as --sync-fd.
+                     # Same fd 10/11 reservation and arithmetic-comparison
+                     # caveats as --sync-fd above.
                      case "$2" in
                        ''|*[!0-9]*) die "--info-fd must be a non-negative integer: $2" ;;
-                       10|11)       die "--info-fd cannot be 10 or 11 (reserved by wrapper for seccomp BPF)" ;;
                      esac
+                     if [ "$2" -eq 10 ] 2>/dev/null || [ "$2" -eq 11 ] 2>/dev/null; then
+                       die "--info-fd cannot be 10 or 11 (reserved by wrapper for seccomp BPF)"
+                     fi
                      info_fd=$2; shift 2 ;;
     -h|--help)       usage; exit 0 ;;
     --)              shift; break ;;
