@@ -122,7 +122,9 @@ expect_fail "agent: ~/.aws invisible"           -- "$JAIL" agent -- ls "$HOME/.a
 expect_pass "agent: project dir readable"       -- "$JAIL" agent -- ls "$FLOX_ENV_PROJECT"
 expect_pass "agent: project dir writable"       -- "$JAIL" agent -- touch "$FLOX_ENV_PROJECT/.redteam-write"
 rm -f "$FLOX_ENV_PROJECT/.redteam-write"
-expect_pass "agent: HOME writable"              -- "$JAIL" agent -- touch '/tmp/../tmp/agent-scratch'
+expect_pass "agent: HOME writable"              -- \
+  "$JAIL" agent -- sh -c 'touch "$HOME/.homewrite-test" && rm "$HOME/.homewrite-test"'
+expect_pass "agent: /tmp writable"              -- "$JAIL" agent -- touch /tmp/agent-scratch
 expect_fail "agent: /usr not writable"          -- "$JAIL" agent -- touch /usr/flag
 expect_fail "agent: /etc not writable"          -- "$JAIL" agent -- touch /etc/flag
 
@@ -144,8 +146,9 @@ expect_fail "agent: AWS key not leaked"         -- "$JAIL" agent -- sh -c 'print
 expect_fail "agent: GH token not leaked"        -- "$JAIL" agent -- sh -c 'printenv GITHUB_TOKEN'
 expect_stdout_matches "agent: HOME = agent-home" "agent-home\$" -- \
   "$JAIL" agent -- sh -c 'printenv HOME'
-expect_stdout_matches "agent: PWD = project"    "$FLOX_ENV_PROJECT$" -- \
-  "$JAIL" agent -- sh -c 'pwd'
+# (Old "agent: PWD = project" test was a tautology — it set FLOX_ENV_PROJECT=$PWD
+# at harness top, then asserted the jail pwd matched FLOX_ENV_PROJECT.  The
+# precedence section below has stronger tests that prove the same thing.)
 
 echo
 echo "[agent mode / project dir precedence]"
@@ -198,6 +201,53 @@ expect_fail \
   "run: --ro-bind target is not writable" -- \
   "$JAIL" run --ro-bind "$DIR_A/source.txt" /tmp/robindtarget -- \
     sh -c 'echo clobber > /tmp/robindtarget'
+
+# T4: regression for B1 — user --bind into /etc must work.  Before the fix,
+# --remount-ro /etc ran before user extras, so bwrap couldn't create the user
+# mount point on a read-only /etc and failed with EROFS.
+echo "injected-content" > "$DIR_A/etc-source.txt"
+expect_stdout_matches \
+  "run: user --bind into /etc works (after /etc seal)" \
+  "^injected-content\$" -- \
+  "$JAIL" run --bind "$DIR_A/etc-source.txt" /etc/user-injected -- cat /etc/user-injected
+
+# T6: user --setenv survives --clearenv and reaches the jail.
+expect_stdout_matches \
+  "run: user --setenv appears inside jail" \
+  "^canary-setenv-value\$" -- \
+  "$JAIL" run --setenv FOO canary-setenv-value -- sh -c 'printenv FOO'
+
+# T7: user --hostname overrides the default.
+expect_stdout_matches \
+  "run: user --hostname overrides default" \
+  "^redteamhost\$" -- \
+  "$JAIL" run --hostname redteamhost -- hostname
+
+# B3 regression: reserved env-var names are rejected by --passthrough-env.
+expect_fail \
+  "agent: --passthrough-env rejects reserved name HOME" -- \
+  "$JAIL" agent --passthrough-env HOME -- true
+expect_fail \
+  "agent: --passthrough-env rejects reserved name PATH" -- \
+  "$JAIL" agent --passthrough-env PATH -- true
+
+# B3 regression: --passthrough-env actually passes through a non-reserved name.
+expect_stdout_matches \
+  "agent: --passthrough-env passes a non-reserved var" \
+  "^canary-passthrough\$" -- \
+  env MY_TOKEN=canary-passthrough \
+    "$JAIL" agent --passthrough-env MY_TOKEN -- sh -c 'printenv MY_TOKEN'
+
+# B4 regression: --project-as / and --project-as /bin are rejected.
+expect_fail \
+  "agent: --project-as rejects shadowing /" -- \
+  "$JAIL" agent --project-as / -- true
+expect_fail \
+  "agent: --project-as rejects shadowing /bin" -- \
+  "$JAIL" agent --project-as /bin -- true
+expect_fail \
+  "agent: --project-as rejects path under /usr" -- \
+  "$JAIL" agent --project-as /usr/local/project -- true
 
 echo
 echo "[agent mode / --project-as synthetic path]"
@@ -258,6 +308,30 @@ expect_fail \
   "$JAIL" agent --no-seccomp -- perl -e "$SECCOMP_PROBE"
 
 echo
+echo "[interactive pty: agent preserves controlling tty, run severs it]"
+# T5: the reason agent mode does NOT pass --new-session is to keep an
+# interactive controlling tty for tools like Claude Code.  Run mode DOES pass
+# --new-session, which calls setsid() and severs the controlling-tty link.
+#
+# Probe: 'test -t 0' is too weak — it only checks isatty(fd) on a character
+# device, which is unaffected by setsid().  The strict probe is opening
+# /dev/tty for reading: the kernel resolves /dev/tty to the *controlling*
+# terminal, so after setsid the open fails with ENXIO.
+#
+# We use script(1) to allocate a real pty around the harness invocation;
+# gated on availability.
+if command -v script >/dev/null 2>&1; then
+  expect_pass \
+    "agent: controlling tty preserved (open /dev/tty succeeds)" -- \
+    script -qefc "$JAIL agent -- sh -c 'exec </dev/tty'" /dev/null
+  expect_fail \
+    "run: --new-session severs controlling tty (open /dev/tty fails)" -- \
+    script -qefc "$JAIL run -- sh -c 'exec </dev/tty'" /dev/null
+else
+  echo "  skip: script(1) not available, T5 pty tests skipped"
+fi
+
+echo
 echo "[agent mode / PATH inheritance]"
 # Agent mode should inherit host $PATH (so Flox/Nix-installed commands work).
 # Run mode should keep its minimal baseline PATH.
@@ -292,10 +366,9 @@ expect_pass \
   "check: exits 0 on this host" -- \
   "$JAIL" check
 
-expect_stdout_matches \
-  "check: reports PASS lines" \
-  "PASS" -- \
-  "$JAIL" check
+expect_pass \
+  "check: reports at least 15 PASS lines" -- \
+  bash -c 'n=$("$1" check 2>/dev/null | grep -c "^  PASS "); test "$n" -ge 15' _ "$JAIL"
 
 expect_stdout_matches \
   "check: reports 0 failed" \
