@@ -182,9 +182,9 @@ Mount ordering (bwrap applies operations in argv order; later wins):
                    run   → HOME=/tmp, --new-session
   7. User extras:  --bind, --ro-bind, --setenv (so user can re-expose
                    anything from the default policy or layer on more)
-  8. Seal:         --remount-ro /etc (the tmpfs becomes ro; existing
+  8. Lifecycle:    --lock-file, --sync-fd (if passed)
+  9. Seal:         --remount-ro /etc (the tmpfs becomes ro; existing
                    bind mounts on top of it survive)
-  9. Lifecycle:    --lock-file, --sync-fd
   10. Safety:      --seccomp (TIOCSTI BPF blob)"
 }
 
@@ -251,7 +251,8 @@ run_check() {
       --die-with-parent --hostname --new-session \
       --bind --ro-bind --ro-bind-try \
       --tmpfs --proc --dev --remount-ro \
-      --clearenv --setenv --chdir --seccomp
+      --clearenv --setenv --chdir --seccomp \
+      --lock-file --sync-fd
   do
     if printf '%s' "$help_out" | grep -qE -- "(^|[[:space:]])${flag}([[:space:]]|$)"; then
       pass_msg "bwrap supports $flag"
