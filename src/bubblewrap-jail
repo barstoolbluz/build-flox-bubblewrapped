@@ -155,6 +155,13 @@ run_check() {
   # with the flags the wrapper actually passes at runtime — a green check
   # that omits a required flag is worse than no check at all.  If you add
   # a new bwrap flag anywhere else in this script, add it here too.
+  #
+  # The grep uses a word-boundary pattern ((^|space) flag (space|eol)) so
+  # that --bind does NOT false-positive on --bind-try / --bind-data, --dev
+  # on --dev-bind, and --ro-bind on --ro-bind-try.  A plain substring match
+  # would let a hypothetical bwrap that shipped only the -try variants pass
+  # the probe silently.  Today no bwrap release has that split, but the
+  # probe should be semantically correct regardless.
   help_out=$(bwrap --help 2>/dev/null)
   for flag in \
       --unshare-user --unshare-ipc --unshare-pid --unshare-uts \
@@ -165,7 +172,7 @@ run_check() {
       --tmpfs --proc --dev --remount-ro \
       --clearenv --setenv --chdir --seccomp
   do
-    if printf '%s' "$help_out" | grep -q -- "$flag"; then
+    if printf '%s' "$help_out" | grep -qE -- "(^|[[:space:]])${flag}([[:space:]]|$)"; then
       pass_msg "bwrap supports $flag"
     else
       fail_msg "bwrap missing feature" "$flag"
