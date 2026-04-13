@@ -1,7 +1,22 @@
 # bubblewrap-jail roadmap
 
-Reviewer feedback for what's needed before broader internal use, plus
-strongly-recommended hardening. Status reflects v0.2.4.
+Layered tracking of reviewer feedback and follow-on work.  Four
+sections:
+
+1. **Must-have before broader internal use** — original reviewer
+   blockers (C*, S*, O*, V1).  Written at v0.2.4; closed out by v0.2.7.
+2. **Strongly recommended** — original reviewer hardening items
+   (B*, E*, F*).  Closed out by v0.3.2.
+3. **Reviewer non-blockers (closed in v0.4.x)** — R1/R2/R3 plus the
+   A1 audit-loop fix.
+4. **Nice-to-have** — post-roadmap proposals (L*, D*, U*).  L1/L2
+   are historical aliases for V1; D1 and U1 are open.
+
+Each narrative entry below carries an inline status tag and, where
+applicable, a "Landed in vX.Y.Z" pointer to the release that closed
+the gap.  The authoritative cumulative state lives in the **execution
+status tables** at the bottom of this file — when in doubt, trust
+the tables.
 
 Status legend:
 - `[DONE]` — shipped and verified
@@ -22,14 +37,17 @@ Status legend:
   rule: "this list MUST stay in sync with the flags the wrapper actually
   passes at runtime".
 
-- **C2. `[PARTIAL]` Fail with a clear message if the seccomp blob is
+- **C2. `[DONE]` Fail with a clear message if the seccomp blob is
   requested but missing, unreadable, or rejected by the running bwrap.**
   Missing/unreadable cases: handled at `src/bubblewrap-jail:566-585`
   ("seccomp BPF not readable: $BPF_PATH (package broken?)"). Rejected-by-
-  bwrap case: currently propagates bwrap's own error after `exec`. **Gap:**
-  add a pre-flight validation (small `bwrap … --seccomp 11 … true`) before
-  the real exec so we can wrap the failure in a clear context message
-  instead of a bare bwrap stderr line.
+  bwrap case: originally propagated bwrap's own error after `exec`. **Gap
+  (closed):** a pre-flight validation (`bwrap … --seccomp 11 … true`)
+  runs before the real exec so we can wrap the failure in a clear
+  context message. **Landed in v0.2.5**; see the seccomp block in
+  `src/bubblewrap-jail` (around the pre-flight probe) for the
+  current implementation. Also captures bwrap's stderr in the die
+  message (A1 refinement in v0.3.4).
 
 - **C3. `[DONE]` Add `--die-with-parent`, at least in agent mode.**
   Shipped in v0.1.0. It's in the base args block at
@@ -56,39 +74,44 @@ Status legend:
 
 ### 3. Operational behavior
 
-- **O1. `[TODO]` Decide and test parent death / child death / signal
+- **O1. `[DONE]` Decide and test parent death / child death / signal
   forwarding.**
-  Parent death: `--die-with-parent` already present, but no test
-  asserts it. Child death: bwrap's default behavior is "exit when
-  child exits" — also untested. Signal forwarding: bwrap forwards
-  signals to the child; we should verify SIGTERM/SIGINT propagation
-  and exit-code preservation. Need explicit decisions documented in
-  the script header, then end-to-end tests.
+  Parent death: `--die-with-parent` already present; static guard
+  test added. Child death: bwrap exits when child exits — covered
+  by every existing test implicitly. Signal forwarding: SIGTERM
+  via `timeout(1)` tested end-to-end for both `run` and `agent`
+  modes. Exit-code propagation: explicit tests including a specific
+  code-42 check. Decisions documented in the script header's
+  "Lifecycle and signals" section. **Landed in v0.2.6.**
 
-- **O2. `[PARTIAL]` Regression tests for the listed cases.**
-  Already covered:
+- **O2. `[DONE]` Regression tests for the listed cases.**
+  All 8 sub-items now covered:
   - `[DONE]` run vs agent
   - `[DONE]` `--net` vs default no-net
   - `[DONE]` `--bind` / `--ro-bind`
   - `[DONE]` `--project-as`
   - `[DONE]` tty interactive mode (T5 in v0.2.1)
-
-  **Gaps:**
-  - `[TODO]` missing `/nix` (probe whether the wrapper degrades gracefully
-    or fails clearly)
-  - `[TODO]` missing seccomp artifact (corrupt BPF / unreadable / rejected;
-    overlaps with C2)
-  - `[TODO]` exit-code propagation (`bubblewrap-jail run -- false` should
-    exit non-zero; specific codes should pass through)
+  - `[DONE]` missing `/nix` — static guard that the wrapper uses
+    `--ro-bind-try /nix` (not `--ro-bind`), so a host without /nix
+    is handled gracefully. **Landed in v0.2.7.**
+  - `[DONE]` missing seccomp artifact — overlaps with C2; corrupt-
+    BPF end-to-end test using a zero-byte BPF and a copy of the
+    wrapper with its `BPF_PATH` sed-rewritten. **Landed in v0.2.5.**
+  - `[DONE]` exit-code propagation — `run`/`agent` tests for true/
+    false, specific exit code 42 through the wrapper. **Landed in
+    v0.2.6.**
 
 ### 4. Observability
 
-- **V1. `[TODO]` Machine-readable mode using bubblewrap's external
+- **V1. `[DONE]` Machine-readable mode using bubblewrap's external
   monitoring options (`--lock-file`, `--sync-fd`).**
-  Not currently exposed by the wrapper. `--lock-file PATH` lets a parent
-  wait for the sandbox to fully start; `--sync-fd FD` is a stable primitive
-  for lifecycle tracking and CI integration. Add pass-through flags and
-  document the invariant they provide.
+  Shipped as pass-throughs with integer validation. `--lock-file`
+  auto-binds the path into the jail so bwrap can open it after
+  namespace setup; `--sync-fd` gives pipe-EOF lifecycle tracking.
+  Both reject fd 10 and 11 (reserved by the wrapper for the seccomp
+  BPF) via arithmetic comparison that handles leading-zero variants
+  (A1 in v0.4.3). **Landed in v0.2.7.** `--info-fd` added as a
+  machine-readable sibling in v0.4.0 (R2 below).
 
 ---
 
@@ -100,56 +123,62 @@ Status legend:
   Reviewer approved keeping it in v0.2.3 audit; it's narrow, readable, and
   audit-friendly. Header comment cleaned up in v0.2.3.
 
-- **B2. `[TODO]` Emit a human-readable representation of the BPF filter
+- **B2. `[DONE]` Emit a human-readable representation of the BPF filter
   during build or test runs.**
-  `seccomp_export_bpf()` already produces the kernel-consumable blob.
-  libseccomp also exposes `seccomp_export_pfc()` ("pseudo filter code") for
-  human review. Add a `gen-seccomp --pfc` mode (or a separate emit) that
-  the build invokes once and saves alongside `tiocsti.bpf` for audit.
+  `gen-seccomp` accepts a `--pfc` flag that uses libseccomp's
+  `seccomp_export_pfc()` to emit the pseudo-filter-code textual
+  form.  Build runs both `./gen-seccomp > tiocsti.bpf` and
+  `./gen-seccomp --pfc > tiocsti.pfc` and installs both alongside
+  each other in `$out/share/bubblewrap-jail/`. **Landed in v0.3.2.**
 
 ### 6. Environment policy
 
-- **E1. `[TODO]` Clean allowlist surface for environment passthrough.**
-  Currently `--passthrough-env VAR` accepts a single var name; multi-var
-  passthrough requires multiple flags. Decide whether to support repeat
-  (`--passthrough-env A --passthrough-env B`), comma-list
-  (`--passthrough-env A,B,C`), or both. Requires updating reserved-name
-  rejection to scan each entry.
+- **E1. `[DONE]` Clean allowlist surface for environment passthrough.**
+  `--passthrough-env VAR` is repeatable (each occurrence adds a var
+  to the allowlist); `BUBBLEWRAP_JAIL_PASSTHROUGH_ENV` accepts a
+  comma-separated CSV list; reserved-name rejection (PATH, HOME,
+  TMPDIR, TERM, LANG, PWD) is applied per entry. Empty entries
+  from leading/trailing/double commas are silently tolerated.
+  **Landed in v0.3.0.**
 
 - **E2. `[DONE]` Keep `--clearenv` as the base; every inherited variable
   deliberate.**
   Already true. `src/bubblewrap-jail:444-450` does `--clearenv` then
   explicit `--setenv` for each allowed variable. No implicit inheritance.
 
-- **E3. `[PARTIAL]` Document which variables are always injected in `run`
+- **E3. `[DONE]` Document which variables are always injected in `run`
   and `agent`.**
-  Help text mentions some inline but isn't a single table. Add a clear
-  "Environment in jail:" section to `--help` enumerating exactly what each
-  mode sets, and what it inherits when set on the host.
+  Help text now has a dedicated "Environment in jail:" section
+  enumerating exactly what each mode sets after `--clearenv`, plus
+  the passthrough var(s) and user-supplied `--setenv` flags.
+  **Landed in v0.3.0.**
 
 ### 7. Filesystem policy
 
-- **F1. `[TODO]` Add an explicit read-only mode for the project tree.**
-  Currently agent mode always rw-binds the project. Add a flag
-  (`--project-ro` or similar) that uses `--ro-bind` instead of `--bind`.
-  Useful for read-only review/inspection workflows where the agent should
-  not be able to mutate the source.
+- **F1. `[DONE]` Add an explicit read-only mode for the project tree.**
+  `--project-ro` switches the project bind from `--bind` to
+  `--ro-bind`. Useful for read-only review/inspection workflows
+  where the agent should not be able to mutate the source.
+  Works alongside `--project-as` (tested). **Landed in v0.3.1.**
 
-- **F2. `[TODO]` Reject overlaps with reserved mountpoints in user
+- **F2. `[DONE]` Reject overlaps with reserved mountpoints in user
   `--bind` / `--ro-bind` unless explicitly forced.**
-  `--project-as` already rejects FHS-essential prefixes (B4 in v0.2.1).
-  Apply the same defensive guard to the user-supplied `--bind` / `--ro-bind`
-  destination paths, with an opt-out flag (e.g. `--bind-force`) for users
-  who know what they're doing.
+  User-supplied `--bind` / `--ro-bind` destinations are rejected
+  when they match FHS-essential paths (`/`, `/bin`, `/sbin`, `/usr`,
+  `/lib`, `/lib64`, `/etc`, `/proc`, `/dev`, `/nix`). `--bind-force`
+  opts out for advanced users who genuinely need to shadow an
+  essential. Sub-paths are still allowed, so T4's `user --bind into
+  /etc/foo` continues to work. **Landed in v0.3.1.**
 
-- **F3. `[PARTIAL]` Document mount ordering — bwrap applies operations in
+- **F3. `[DONE]` Document mount ordering — bwrap applies operations in
   argv order.**
-  Already noted partially in `src/bubblewrap-jail:104-106` and the B1 fix
-  comment at `src/bubblewrap-jail:547-552`. Could be a single dedicated
-  section in `--help` or the script header explaining: (1) base layout
-  applied first, (2) network-conditional binds, (3) env block, (4) mode-
-  specific binds, (5) user `--bind` / `--ro-bind` / `--setenv` last,
-  (6) `--remount-ro /etc` seal.
+  `--help` now has a dedicated "Mount ordering" section enumerating
+  the 10-step argv order bwrap sees: skeleton → /etc tmpfs+allowlist
+  → scratch tmpfs → network → env → mode binds → user extras →
+  lifecycle (--lock-file/--sync-fd/--info-fd) → --remount-ro /etc
+  seal → --seccomp. Steps 8 and 9 were initially mis-ordered in the
+  help text and corrected in v0.3.3 (A8). **Landed in v0.3.1**
+  (v0.3.3 docs fix).
 
 ---
 
@@ -182,7 +211,7 @@ host-side PID and namespace info.  Useful for orchestrators that
 want structured sandbox state without parsing stderr.
 
 Shipped in v0.4.0 as a pass-through with integer validation and
-reserved-fd rejection (see F1 below).  End-to-end tested with both
+reserved-fd rejection (see A1 below).  End-to-end tested with both
 jq and grep fallback paths.
 
 ### R3. `[DONE]` CI exercising the full matrix
@@ -315,7 +344,7 @@ recommended sections shipped between v0.2.5 and v0.3.2.  **Done.**
 | R1 | Optional-probe split in `check` | DONE | v0.4.0 |
 | R2 | `--info-fd` pass-through | DONE | v0.4.0 |
 | R3 | GitHub Actions CI workflow | DONE | v0.4.1 |
-| F1 | Reject fd 10/11 for `--sync-fd`/`--info-fd` (audit loop) | DONE | v0.4.2 → v0.4.3 |
+| A1 | Reject fd 10/11 for `--sync-fd`/`--info-fd` (audit loop) | DONE | v0.4.2 → v0.4.3 |
 
 ## Execution status — nice-to-have
 
@@ -326,7 +355,7 @@ recommended sections shipped between v0.2.5 and v0.3.2.  **Done.**
 | D1 | Opt-in `syncfs()` flush for rw modes | TODO | — |
 | U1 | `doctor` / `check --verbose` mode | PARTIAL | existing `check` covers content; no `--verbose`/`--json`/`doctor` alias |
 
-Final state as of v0.4.3:
+Final state as of v0.4.5:
 - red-team **129 / 0** (stable across 10 consecutive runs)
 - check **29 / 0 required, 3 optional supported / 0 missing**
 - runtime closure **35 paths**
