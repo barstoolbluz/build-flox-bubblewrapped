@@ -21,7 +21,10 @@
 
 set -euo pipefail
 
-prog=$(basename "$0")
+# Hardcoded rather than $(basename "$0") because Flox wraps installed binaries
+# with a PATH-setup shim named .bubblewrap-jail-wrapped, which would otherwise
+# leak into error messages and --help.
+prog="bubblewrap-jail"
 
 err() { printf '%s: %s\n' "$prog" "$*" >&2; }
 die() { err "$*"; exit 1; }
