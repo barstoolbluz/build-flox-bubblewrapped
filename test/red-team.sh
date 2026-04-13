@@ -644,6 +644,34 @@ expect_fail \
   "run: --sync-fd rejects empty value" -- \
   "$JAIL" run --sync-fd "" -- true
 
+# --info-fd pass-through: bwrap writes a JSON metadata blob to the
+# inherited fd after sandbox setup, then closes it.  Test by redirecting
+# fd 9 to a scratch file and verifying the file contains a parseable
+# JSON object after the wrapper exits.  If jq is available, parse it and
+# assert that "child-pid" is present; otherwise fall back to a substring
+# check.
+expect_pass \
+  "run: --info-fd writes JSON metadata to inherited fd" -- \
+  bash -c '
+    OUT="$2/v1-info-out"
+    : >"$OUT"
+    "$1" run --info-fd 9 -- true 9>"$OUT"
+    [ -s "$OUT" ] || exit 1
+    if command -v jq >/dev/null 2>&1; then
+      jq -e "has(\"child-pid\")" "$OUT" >/dev/null
+    else
+      grep -q "child-pid" "$OUT"
+    fi
+  ' _ "$JAIL" "$SMOKE_CACHE"
+
+# --info-fd validation: must be a non-negative integer.
+expect_fail \
+  "run: --info-fd rejects non-numeric value" -- \
+  "$JAIL" run --info-fd abc -- true
+expect_fail \
+  "run: --info-fd rejects empty value" -- \
+  "$JAIL" run --info-fd "" -- true
+
 # A4: --lock-file pre-validates that the host path exists.
 expect_fail \
   "run: --lock-file nonexistent host path rejected by wrapper" -- \
@@ -786,6 +814,18 @@ expect_pass \
 expect_stdout_matches \
   "check: reports 0 failed" \
   "0 failed" -- \
+  "$JAIL" check
+
+# Probe-split: check subcommand should emit OPT lines for optional features
+# (--lock-file, --sync-fd, --info-fd).  At least one OPT line required.
+expect_pass \
+  "check: emits OPT lines for optional bwrap features" -- \
+  bash -c 'n=$("$1" check 2>/dev/null | grep -c "^  OPT   "); test "$n" -ge 1' _ "$JAIL"
+
+# Probe-split: summary line mentions the optional count.
+expect_stdout_matches \
+  "check: summary line includes optional counts" \
+  "optional: [0-9]+ supported / [0-9]+ missing" -- \
   "$JAIL" check
 
 echo

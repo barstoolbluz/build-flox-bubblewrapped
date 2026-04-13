@@ -94,6 +94,13 @@ Common options:
                     sees EOF and knows the sandbox is gone.  FD must
                     already be open in the parent and inherited by the
                     wrapper (e.g. \`$prog run --sync-fd 9 ... 9>pipe\`).
+  --info-fd FD      Pass through to bwrap: bwrap writes a JSON metadata
+                    blob to FD after sandbox setup and closes it.  The
+                    JSON includes the sandboxed child's host-side PID
+                    among other fields; see bwrap(1) for the schema.
+                    Useful for orchestrators that want structured info
+                    without parsing stderr.  FD must already be open in
+                    the parent and inherited by the wrapper.
   -h, --help        This help.
 
 Agent-only options:
@@ -182,7 +189,7 @@ Mount ordering (bwrap applies operations in argv order; later wins):
                    run   → HOME=/tmp, --new-session
   7. User extras:  --bind, --ro-bind, --setenv (so user can re-expose
                    anything from the default policy or layer on more)
-  8. Lifecycle:    --lock-file, --sync-fd (if passed)
+  8. Lifecycle:    --lock-file, --sync-fd, --info-fd (if passed)
   9. Seal:         --remount-ro /etc (the tmpfs becomes ro; existing
                    bind mounts on top of it survive)
   10. Safety:      --seccomp (TIOCSTI BPF blob)"
@@ -197,7 +204,7 @@ Mount ordering (bwrap applies operations in argv order; later wins):
 # -----------------------------------------------------------------------------
 
 run_check() {
-  local checks_passed=0 checks_failed=0
+  local checks_passed=0 checks_failed=0 opt_present=0 opt_missing=0
   local help_out flag ver mun bsz
 
   # These are function definitions, not variables — shellcheck gets confused
@@ -212,6 +219,19 @@ run_check() {
     fi
     checks_failed=$((checks_failed+1))
   }
+  # Optional: probe succeeded (feature supported) but missing would NOT be
+  # a failure — the wrapper only uses the flag if the user opts in at runtime.
+  # Output prefix "OPT" is distinct from PASS/FAIL so parsers can tell them
+  # apart.  Does not affect checks_passed or checks_failed.
+  opt_msg() {
+    if [ "$2" = "present" ]; then
+      printf '  OPT   bwrap supports %s  (optional: only needed if %s is passed at runtime)\n' "$1" "$1"
+      opt_present=$((opt_present+1))
+    else
+      printf '  OPT   bwrap missing  %s  (optional: %s will fail if used)\n' "$1" "$1"
+      opt_missing=$((opt_missing+1))
+    fi
+  }
 
   printf '=== bubblewrap-jail compat probe ===\n'
 
@@ -220,7 +240,8 @@ run_check() {
     pass_msg "bwrap in PATH ($(command -v bwrap))"
   else
     fail_msg "bwrap not found in PATH"
-    printf '=== result: %d passed, %d failed ===\n' "$checks_passed" "$checks_failed"
+    printf '=== result: %d passed, %d failed; optional: %d supported / %d missing ===\n' \
+      "$checks_passed" "$checks_failed" "$opt_present" "$opt_missing"
     return 1
   fi
 
@@ -232,10 +253,18 @@ run_check() {
     fail_msg "bwrap --version returned nothing parseable"
   fi
 
-  # Required bwrap features (grep --help).  This list MUST stay in sync
-  # with the flags the wrapper actually passes at runtime — a green check
-  # that omits a required flag is worse than no check at all.  If you add
-  # a new bwrap flag anywhere else in this script, add it here too.
+  # bwrap features split into REQUIRED and OPTIONAL lists.
+  #
+  # Required: the wrapper passes these on every invocation.  Missing any
+  # one is a hard failure — the wrapper cannot function.  This list MUST
+  # stay in sync with the flags the wrapper actually passes at runtime
+  # for run/agent mode.
+  #
+  # Optional: the wrapper only passes these when the user opts in via a
+  # corresponding flag (--lock-file PATH, --sync-fd FD, --info-fd FD).
+  # Missing these on the host bwrap is fine if the user doesn't use
+  # those features.  Reported with an OPT line so the user knows which
+  # wrapper features will be unavailable on this host.
   #
   # The grep uses a word-boundary pattern ((^|space) flag (space|eol)) so
   # that --bind does NOT false-positive on --bind-try / --bind-data, --dev
@@ -244,6 +273,8 @@ run_check() {
   # the probe silently.  Today no bwrap release has that split, but the
   # probe should be semantically correct regardless.
   help_out=$(bwrap --help 2>/dev/null)
+
+  # Required probes.
   for flag in \
       --unshare-user --unshare-ipc --unshare-pid --unshare-uts \
       --unshare-cgroup-try --unshare-net \
@@ -251,13 +282,22 @@ run_check() {
       --die-with-parent --hostname --new-session \
       --bind --ro-bind --ro-bind-try \
       --tmpfs --proc --dev --remount-ro \
-      --clearenv --setenv --chdir --seccomp \
-      --lock-file --sync-fd
+      --clearenv --setenv --chdir --seccomp
   do
     if printf '%s' "$help_out" | grep -qE -- "(^|[[:space:]])${flag}([[:space:]]|$)"; then
       pass_msg "bwrap supports $flag"
     else
       fail_msg "bwrap missing feature" "$flag"
+    fi
+  done
+
+  # Optional probes (opt-in via corresponding wrapper flag).
+  for flag in --lock-file --sync-fd --info-fd
+  do
+    if printf '%s' "$help_out" | grep -qE -- "(^|[[:space:]])${flag}([[:space:]]|$)"; then
+      opt_msg "$flag" present
+    else
+      opt_msg "$flag" missing
     fi
   done
 
@@ -317,7 +357,8 @@ run_check() {
       ;;
   esac
 
-  printf '=== result: %d passed, %d failed ===\n' "$checks_passed" "$checks_failed"
+  printf '=== result: %d passed, %d failed; optional: %d supported / %d missing ===\n' \
+    "$checks_passed" "$checks_failed" "$opt_present" "$opt_missing"
   [ "$checks_failed" -eq 0 ]
 }
 
@@ -355,6 +396,7 @@ passthrough_envs_set_by_flag=0  # tracks --passthrough-env for run-mode rejectio
 seccomp_enabled=1         # may be cleared by --no-seccomp
 lock_file=""              # --lock-file PATH passthrough (V1)
 sync_fd=""                # --sync-fd FD  passthrough (V1)
+info_fd=""                # --info-fd FD  passthrough (observability)
 bind_force=0              # --bind-force opts out of essential-dst guard (F2)
 
 while [ "$#" -gt 0 ]; do
@@ -396,6 +438,11 @@ while [ "$#" -gt 0 ]; do
                        ''|*[!0-9]*) die "--sync-fd must be a non-negative integer: $2" ;;
                      esac
                      sync_fd=$2; shift 2 ;;
+    --info-fd)       [ "$#" -ge 2 ] || die "--info-fd needs FD"
+                     case "$2" in
+                       ''|*[!0-9]*) die "--info-fd must be a non-negative integer: $2" ;;
+                     esac
+                     info_fd=$2; shift 2 ;;
     -h|--help)       usage; exit 0 ;;
     --)              shift; break ;;
     -*)              usage >&2; die "unknown option: $1" ;;
@@ -718,6 +765,13 @@ done
 #     other end of a pipe sees EOF and knows the sandbox is gone.  FD
 #     must already be open in the parent and inherited by the wrapper
 #     (e.g. `bwrap-jail … --sync-fd 9 9>pipe`).
+#
+#   --info-fd FD: bwrap writes a JSON metadata blob to FD after setup
+#     completes, then closes it.  The JSON contains the sandboxed
+#     child's host-side PID among other fields (see bwrap(1) for the
+#     schema).  Useful for orchestrators that want structured sandbox
+#     info without parsing bwrap's stderr.  FD must already be open in
+#     the parent and inherited by the wrapper.
 if [ -n "$lock_file" ]; then
   # Check whether the user already bound this jail-side path.
   _lock_user_bound=0
@@ -747,6 +801,7 @@ if [ -n "$lock_file" ]; then
   unset _lock_user_bound
 fi
 [ -n "$sync_fd" ] && args+=(--sync-fd "$sync_fd")
+[ -n "$info_fd" ] && args+=(--info-fd "$info_fd")
 
 # Seal /etc: remount the tmpfs backing /etc as read-only.  This does NOT
 # recurse into the bind mounts layered on top, so the baseline allowlist
