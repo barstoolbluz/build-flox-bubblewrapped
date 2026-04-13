@@ -5,15 +5,46 @@ bubblewrap.pkg-path = "bubblewrap"
 bubblewrap.systems = ["x86_64-linux", "aarch64-linux"]
 shellcheck.pkg-path = "shellcheck"
 bashInteractive.pkg-path = "bashInteractive"
+libseccomp.pkg-path = "libseccomp"
+libseccomp.outputs = ["out", "lib", "dev"]
+pkg-config.pkg-path = "pkg-config"
+gcc.pkg-path = "gcc"
+perl.pkg-path = "perl"
 
 [build.bubblewrap-jail]
-version = "0.1.0"
+version = "0.2.0"
 description = "Opinionated bubblewrap wrapper: run/agent subcommands, secure-by-default defaults"
 sandbox = "pure"
 runtime-packages = ["bubblewrap"]
 command = '''
+  set -euo pipefail
+
+  # Lint the script under shellcheck.  Style severity catches even nits.
   shellcheck --severity=style --shell=bash src/bubblewrap-jail
+
+  # Compile the seccomp helper that generates the TIOCSTI-blocking BPF blob.
+  # -Wno-missing-field-initializers silences a warning from libseccomp's
+  # SCMP_A1 macro, which intentionally leaves the range-high field zeroed.
+  gcc -O2 -Wall -Wextra -Wno-missing-field-initializers \
+      -o gen-seccomp src/gen-seccomp.c \
+      $(pkg-config --cflags --libs libseccomp)
+
+  # Generate the BPF blob.  Refuse to ship an empty or implausibly large one.
+  ./gen-seccomp > tiocsti.bpf
+  bpf_bytes=$(wc -c < tiocsti.bpf)
+  if [ "$bpf_bytes" -lt 32 ] || [ "$bpf_bytes" -gt 4096 ]; then
+    echo "gen-seccomp: unexpected BPF size $bpf_bytes" >&2
+    exit 1
+  fi
+
+  # Install artifacts.
+  install -Dm644 tiocsti.bpf         $out/share/bubblewrap-jail/tiocsti.bpf
   install -Dm755 src/bubblewrap-jail $out/bin/bubblewrap-jail
+
+  # Substitute the final BPF path into the installed script.  The | delimiter
+  # avoids escaping the / in the nix store path.
+  sed -i "s|@BPF_PATH@|$out/share/bubblewrap-jail/tiocsti.bpf|g" \
+      $out/bin/bubblewrap-jail
 '''
 
 [options]

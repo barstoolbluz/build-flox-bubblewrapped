@@ -26,11 +26,20 @@ set -euo pipefail
 # leak into error messages and --help.
 prog="bubblewrap-jail"
 
+# Path to the precompiled seccomp BPF blob that blocks ioctl(TIOCSTI, ...).
+# Substituted at build time by the flox build step (see manifest.toml).
+# When this script is run from source (development), the placeholder is
+# unsubstituted and the seccomp filter is skipped with a stderr warning.
+BPF_PATH="@BPF_PATH@"
+
 err() { printf '%s: %s\n' "$prog" "$*" >&2; }
 die() { err "$*"; exit 1; }
 
 usage() {
-  cat <<EOF
+  # Use printf (a bash builtin) rather than cat so --help works even when
+  # PATH is empty / bwrap and coreutils are unavailable.
+  local IFS=''
+  printf '%s\n' "\
 Usage: $prog <subcommand> [options] -- CMD [ARGS...]
 
 Subcommands:
@@ -40,10 +49,15 @@ Subcommands:
 Common options:
   --net             Enable network (adds TLS certs, DNS, hosts).
   --no-net          Disable network.
-  --bind DST SRC    Additional rw bind mount (may repeat).
-  --ro-bind DST SRC Additional ro bind mount (may repeat).
+  --bind SRC DST    Additional rw bind: mount host SRC at jail path DST.
+                    Argument order matches bwrap(1).  May repeat.
+  --ro-bind SRC DST Additional ro bind: mount host SRC at jail path DST.
+                    Argument order matches bwrap(1).  May repeat.
   --setenv K V      Allowlist additional environment variable (may repeat).
   --hostname NAME   Sandbox hostname (default: bubblewrap-jail).
+  --no-seccomp      Disable the default TIOCSTI-blocking seccomp filter.
+                    Not recommended.  Exists for debugging and for running
+                    the script from an unbuilt source tree.
   -h, --help        This help.
 
 Agent-only options:
@@ -51,6 +65,13 @@ Agent-only options:
                     Default: \$BUBBLEWRAP_JAIL_PROJECT or \$PWD.
                     (\$FLOX_ENV_PROJECT is NOT used as a fallback; it points at
                     the tool env when layered, which is almost never correct.)
+  --project-as DIR  Map the project dir to a synthetic path DST inside the
+                    jail.  Host SRC is still the project dir above, but inside
+                    the jail it appears at DST (and cwd is DST).  Default:
+                    bind same-path (no remapping).  Use this when you want
+                    stronger structural isolation, at the cost of breaking
+                    tools that embed absolute paths in caches, debug info,
+                    venvs, or linked git worktrees.
   --agent-home DIR  Persistent agent HOME.
                     Default: \$FLOX_ENV_CACHE/agent-home, else
                     \${XDG_CACHE_HOME:-\$HOME/.cache}/bubblewrap-jail/agent-home.
@@ -63,19 +84,27 @@ Environment variables (used as defaults; flags override):
   BUBBLEWRAP_JAIL_HOME        path   (default agent home, agent only)
   BUBBLEWRAP_JAIL_API_KEY_ENV name   (default: ANTHROPIC_API_KEY)
 
-Defaults (v1):
+Defaults:
   run mode:   net off; HOME=/tmp; cwd=/tmp; no project binding.
-  agent mode: net on;  HOME=<agent-home>; cwd=<project>; API key passed
-              through if set on host; host ~/.gitconfig ro-bound if present.
+  agent mode: net on;  HOME=<agent-home>; cwd=<project>; host \$PATH inherited;
+              API key passed through if set on host; host ~/.gitconfig
+              ro-bound if present.
 
-In both modes, the following are NEVER visible inside the jail:
+Not mounted by default (i.e. hidden from the jail unless you explicitly
+re-expose them with --bind / --ro-bind):
   ~/.ssh  ~/.gnupg  ~/.aws  ~/.config
-  /etc/shadow  /etc/ssh  /etc/sudoers
+  /etc/shadow  /etc/ssh  /etc/sudoers  /etc/pam.d
   any \$HOME/* path not explicitly allowlisted
-EOF
+
+Treat this list as a policy, not a guarantee.  If you pass
+  --bind \$HOME/.ssh \$HOME/.ssh
+the ssh keys will be visible inside the jail.  User-supplied binds are
+applied AFTER the default policy and can therefore re-expose anything."
 }
 
-command -v bwrap >/dev/null 2>&1 || die "bwrap not found in PATH"
+# NOTE: no "bwrap present?" check here on purpose.  We want --help and
+# bad-subcommand errors to work even when bwrap isn't installed.  The actual
+# dependency check happens right before exec bwrap at the bottom of the file.
 
 # -----------------------------------------------------------------------------
 # Parse subcommand
@@ -98,20 +127,22 @@ esac
 
 net=""                    # "" = use subcommand default
 project=""
+project_as=""             # "" = same-path bind (no remapping)
 agent_home=""
 extra_bind=()
 extra_ro_bind=()
 extra_setenv=()
 hostname="bubblewrap-jail"
 api_key_env="${BUBBLEWRAP_JAIL_API_KEY_ENV:-ANTHROPIC_API_KEY}"
+seccomp_enabled=1         # may be cleared by --no-seccomp
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --net)           net=1; shift ;;
     --no-net)        net=0; shift ;;
-    --bind)          [ "$#" -ge 3 ] || die "--bind needs DST SRC"
+    --bind)          [ "$#" -ge 3 ] || die "--bind needs SRC DST"
                      extra_bind+=("$2" "$3"); shift 3 ;;
-    --ro-bind)       [ "$#" -ge 3 ] || die "--ro-bind needs DST SRC"
+    --ro-bind)       [ "$#" -ge 3 ] || die "--ro-bind needs SRC DST"
                      extra_ro_bind+=("$2" "$3"); shift 3 ;;
     --setenv)        [ "$#" -ge 3 ] || die "--setenv needs K V"
                      extra_setenv+=("$2" "$3"); shift 3 ;;
@@ -119,10 +150,13 @@ while [ "$#" -gt 0 ]; do
                      hostname=$2; shift 2 ;;
     --project)       [ "$#" -ge 2 ] || die "--project needs DIR"
                      project=$2; shift 2 ;;
+    --project-as)    [ "$#" -ge 2 ] || die "--project-as needs DIR"
+                     project_as=$2; shift 2 ;;
     --agent-home)    [ "$#" -ge 2 ] || die "--agent-home needs DIR"
                      agent_home=$2; shift 2 ;;
     --api-key-env)   [ "$#" -ge 2 ] || die "--api-key-env needs VAR"
                      api_key_env=$2; shift 2 ;;
+    --no-seccomp)    seccomp_enabled=0; shift ;;
     -h|--help)       usage; exit 0 ;;
     --)              shift; break ;;
     -*)              usage >&2; die "unknown option: $1" ;;
@@ -135,6 +169,7 @@ done
 # Reject agent-only flags in run mode so misuse is noisy, not silent.
 if [ "$cmd" = "run" ]; then
   [ -z "$project"    ] || die "--project is agent-only"
+  [ -z "$project_as" ] || die "--project-as is agent-only"
   [ -z "$agent_home" ] || die "--agent-home is agent-only"
 fi
 
@@ -169,6 +204,19 @@ if [ "$cmd" = "agent" ]; then
   fi
   [ -d "$project" ] || die "project dir not a directory: $project"
   project=$(cd "$project" && pwd -P)
+
+  # Default: bind same-path inside as outside.  Tools that record absolute
+  # paths (git worktrees, build caches, compiler debug info, Python venvs)
+  # keep working across the jail boundary.
+  if [ -z "$project_as" ]; then
+    project_as=$project
+  else
+    # Must be absolute to be a valid bwrap bind target.
+    case "$project_as" in
+      /*) ;;
+      *)  die "--project-as must be an absolute path: $project_as" ;;
+    esac
+  fi
 
   if [ -z "$agent_home" ]; then
     if [ -n "${BUBBLEWRAP_JAIL_HOME:-}" ]; then
@@ -211,7 +259,7 @@ args=(
   --ro-bind-try /sbin /sbin
   --ro-bind-try /lib  /lib
   --ro-bind-try /lib64 /lib64
-  --ro-bind /nix /nix
+  --ro-bind-try /nix /nix
 
   # /etc: tmpfs with a surgical allowlist bind-mounted on top.  After all
   # binds are in place, --remount-ro makes the underlying tmpfs read-only too,
@@ -270,12 +318,20 @@ args+=(
 # Mode-specific bindings.
 if [ "$cmd" = "agent" ]; then
   args+=(
-    --bind "$project"    "$project"
+    --bind "$project"    "$project_as"
     --bind "$agent_home" "$agent_home"
     --setenv HOME "$agent_home"
     --setenv TMPDIR "/tmp"
-    --chdir "$project"
+    --chdir "$project_as"
   )
+
+  # Inherit the host $PATH so that Flox- and Nix-installed commands
+  # ($FLOX_ENV/bin, /nix/var/nix/profiles/default/bin, etc.) resolve
+  # normally inside the jail.  Fall back to the minimal PATH from the
+  # base stanza if the host has none.  Later --setenv wins, per bwrap.
+  if [ -n "${PATH:-}" ]; then
+    args+=(--setenv PATH "$PATH")
+  fi
 
   # Pass host ~/.gitconfig ro, if present — convenience for git-using agents.
   # Rejected: ~/.git-credentials, ~/.netrc (auth material).
@@ -324,5 +380,31 @@ while [ $i -lt ${#extra_setenv[@]} ]; do
   args+=(--setenv "${extra_setenv[i]}" "${extra_setenv[i+1]}")
   i=$((i + 2))
 done
+
+# Dependency check lives here (not at the top) so --help and early arg errors
+# work even when bwrap isn't installed.
+command -v bwrap >/dev/null 2>&1 || die "bwrap not found in PATH"
+
+# Attach the seccomp TIOCSTI filter.  Blocks ioctl(_, TIOCSTI, _) with EPERM,
+# closing the TTY-injection attack class without --new-session (which would
+# break interactive agent use).  See src/gen-seccomp.c for the filter.
+#
+# Precedence: if the script is running from an unbuilt source tree the BPF
+# placeholder is still "@BPF_PATH@" and we skip the filter with a warning.
+# If --no-seccomp was passed, we skip silently.  Otherwise the file must
+# exist and be readable — a missing file in a built package is a hard error.
+if [ "$seccomp_enabled" = "1" ]; then
+  if [ "$BPF_PATH" = "@BPF_PATH@" ]; then
+    printf '%s: warning: running from unbuilt source, TIOCSTI seccomp filter not applied (use --no-seccomp to silence)\n' \
+      "$prog" >&2
+  elif [ ! -r "$BPF_PATH" ]; then
+    die "seccomp BPF not readable: $BPF_PATH (package broken?)"
+  else
+    # Open on fd 10 and pass to bwrap.  bwrap inherits non-cloexec fds,
+    # and bash's `exec N<file` form does not set cloexec by default.
+    exec 10<"$BPF_PATH"
+    args+=(--seccomp 10)
+  fi
+fi
 
 exec bwrap "${args[@]}" -- "$@"
