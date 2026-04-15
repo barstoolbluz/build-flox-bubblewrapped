@@ -1,83 +1,23 @@
 schema-version = "1.11.0"
 
+# Dev-shell packages only.  The BUILD of bubblewrap-jail is defined as a
+# nix expression at .flox/pkgs/bubblewrap-jail.nix — its build inputs
+# (pkg-config, libseccomp, shellcheck) come from the expression's function
+# arguments, not from this [install] block.
+#
+# What's here exists so that `flox activate` gives an ergonomic interactive
+# dev shell for:
+#   - running the red-team test harness against either the built artifact
+#     or the source tree (both bubblewrap and perl are used by tests)
+#   - local shellcheck-before-build iteration on src/bubblewrap-jail
+#   - validating `check --json` output structurally via jq
 [install]
-bubblewrap.pkg-path = "bubblewrap"
-bubblewrap.systems = ["x86_64-linux", "aarch64-linux"]
-shellcheck.pkg-path = "shellcheck"
 bashInteractive.pkg-path = "bashInteractive"
-libseccomp.pkg-path = "libseccomp"
-libseccomp.outputs = ["out", "lib", "dev"]
-pkg-config.pkg-path = "pkg-config"
-gcc.pkg-path = "gcc"
-perl.pkg-path = "perl"
-# jq is a build-env-only dep used by the red-team test suite to
-# validate `check --json` output structurally.  NOT in runtime-packages
-# below — the wrapper itself does not call jq at runtime.
-jq.pkg-path = "jq"
-
-[build.bubblewrap-jail]
-version = "0.4.7"
-description = "Opinionated bubblewrap wrapper: run/agent subcommands, secure-by-default defaults"
-sandbox = "pure"
-runtime-packages = ["bubblewrap"]
-command = '''
-  set -euo pipefail
-
-  # Lint the script under shellcheck.  Style severity catches even nits.
-  shellcheck --severity=style --shell=bash src/bubblewrap-jail
-
-  # Compile the seccomp helper that generates the TIOCSTI-blocking BPF blob.
-  # -Wno-missing-field-initializers silences a warning from libseccomp's
-  # SCMP_A1 macro, which intentionally leaves the range-high field zeroed.
-  gcc -O2 -Wall -Wextra -Wno-missing-field-initializers \
-      -o gen-seccomp src/gen-seccomp.c \
-      $(pkg-config --cflags --libs libseccomp)
-
-  # Generate the BPF blob.  Refuse to ship an empty or implausibly large one.
-  ./gen-seccomp > tiocsti.bpf
-  bpf_bytes=$(wc -c < tiocsti.bpf)
-  if [ "$bpf_bytes" -lt 32 ] || [ "$bpf_bytes" -gt 4096 ]; then
-    echo "gen-seccomp: unexpected BPF size $bpf_bytes" >&2
-    exit 1
-  fi
-
-  # Generate the human-readable PFC dump (B2).  This is purely for
-  # review/audit — the wrapper doesn't read it at runtime — but shipping
-  # it alongside tiocsti.bpf gives an auditor a one-cat view of what the
-  # filter actually does without needing libseccomp tooling.
-  ./gen-seccomp --pfc > tiocsti.pfc
-  if [ ! -s tiocsti.pfc ]; then
-    echo "gen-seccomp --pfc produced empty output" >&2
-    exit 1
-  fi
-
-  # Sanity check: gen-seccomp should reject too many arguments (A9 guard).
-  # A regression that silently ignores extra args would let typos like
-  # "gen-seccomp --pfc out.pfc" pass without the user noticing.
-  if ./gen-seccomp --pfc extra-arg >/dev/null 2>&1; then
-    echo "gen-seccomp accepts extra arguments (A9 regression)" >&2
-    exit 1
-  fi
-
-  # Install artifacts.
-  install -Dm644 tiocsti.bpf         $out/share/bubblewrap-jail/tiocsti.bpf
-  install -Dm644 tiocsti.pfc         $out/share/bubblewrap-jail/tiocsti.pfc
-  install -Dm755 src/bubblewrap-jail $out/bin/bubblewrap-jail
-
-  # Substitute the final BPF path into the installed script.  The | delimiter
-  # avoids escaping the / in the nix store path.
-  sed -i "s|@BPF_PATH@|$out/share/bubblewrap-jail/tiocsti.bpf|g" \
-      $out/bin/bubblewrap-jail
-
-  # Substitute the wrapper version into the installed script.  Extract
-  # the version from $out's basename (path shape is
-  # /nix/store/HASH-bubblewrap-jail-X.Y.Z).  Used by `check --json` for
-  # the wrapper_version field.  CRITICAL: don't put @VERSION@ in any
-  # comment in the script — sed's global replace would rewrite it,
-  # same class of bug as C2 in v0.3.6.
-  pkg_version=$(basename "$out" | sed 's/.*-bubblewrap-jail-//')
-  sed -i "s|@VERSION@|$pkg_version|g" $out/bin/bubblewrap-jail
-'''
+shellcheck.pkg-path      = "shellcheck"
+jq.pkg-path              = "jq"
+perl.pkg-path            = "perl"
+bubblewrap.pkg-path      = "bubblewrap"
+bubblewrap.systems       = ["x86_64-linux", "aarch64-linux"]
 
 [options]
 systems = ["x86_64-linux", "aarch64-linux"]

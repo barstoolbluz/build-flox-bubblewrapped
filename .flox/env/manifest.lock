@@ -13,25 +13,11 @@
           "aarch64-linux"
         ]
       },
-      "gcc": {
-        "pkg-path": "gcc"
-      },
       "jq": {
         "pkg-path": "jq"
       },
-      "libseccomp": {
-        "pkg-path": "libseccomp",
-        "outputs": [
-          "out",
-          "lib",
-          "dev"
-        ]
-      },
       "perl": {
         "pkg-path": "perl"
-      },
-      "pkg-config": {
-        "pkg-path": "pkg-config"
       },
       "shellcheck": {
         "pkg-path": "shellcheck"
@@ -42,17 +28,6 @@
         "x86_64-linux",
         "aarch64-linux"
       ]
-    },
-    "build": {
-      "bubblewrap-jail": {
-        "command": "  set -euo pipefail\n\n  # Lint the script under shellcheck.  Style severity catches even nits.\n  shellcheck --severity=style --shell=bash src/bubblewrap-jail\n\n  # Compile the seccomp helper that generates the TIOCSTI-blocking BPF blob.\n  # -Wno-missing-field-initializers silences a warning from libseccomp's\n  # SCMP_A1 macro, which intentionally leaves the range-high field zeroed.\n  gcc -O2 -Wall -Wextra -Wno-missing-field-initializers \\\n      -o gen-seccomp src/gen-seccomp.c \\\n      $(pkg-config --cflags --libs libseccomp)\n\n  # Generate the BPF blob.  Refuse to ship an empty or implausibly large one.\n  ./gen-seccomp > tiocsti.bpf\n  bpf_bytes=$(wc -c < tiocsti.bpf)\n  if [ \"$bpf_bytes\" -lt 32 ] || [ \"$bpf_bytes\" -gt 4096 ]; then\n    echo \"gen-seccomp: unexpected BPF size $bpf_bytes\" >&2\n    exit 1\n  fi\n\n  # Generate the human-readable PFC dump (B2).  This is purely for\n  # review/audit — the wrapper doesn't read it at runtime — but shipping\n  # it alongside tiocsti.bpf gives an auditor a one-cat view of what the\n  # filter actually does without needing libseccomp tooling.\n  ./gen-seccomp --pfc > tiocsti.pfc\n  if [ ! -s tiocsti.pfc ]; then\n    echo \"gen-seccomp --pfc produced empty output\" >&2\n    exit 1\n  fi\n\n  # Sanity check: gen-seccomp should reject too many arguments (A9 guard).\n  # A regression that silently ignores extra args would let typos like\n  # \"gen-seccomp --pfc out.pfc\" pass without the user noticing.\n  if ./gen-seccomp --pfc extra-arg >/dev/null 2>&1; then\n    echo \"gen-seccomp accepts extra arguments (A9 regression)\" >&2\n    exit 1\n  fi\n\n  # Install artifacts.\n  install -Dm644 tiocsti.bpf         $out/share/bubblewrap-jail/tiocsti.bpf\n  install -Dm644 tiocsti.pfc         $out/share/bubblewrap-jail/tiocsti.pfc\n  install -Dm755 src/bubblewrap-jail $out/bin/bubblewrap-jail\n\n  # Substitute the final BPF path into the installed script.  The | delimiter\n  # avoids escaping the / in the nix store path.\n  sed -i \"s|@BPF_PATH@|$out/share/bubblewrap-jail/tiocsti.bpf|g\" \\\n      $out/bin/bubblewrap-jail\n\n  # Substitute the wrapper version into the installed script.  Extract\n  # the version from $out's basename (path shape is\n  # /nix/store/HASH-bubblewrap-jail-X.Y.Z).  Used by `check --json` for\n  # the wrapper_version field.  CRITICAL: don't put @VERSION@ in any\n  # comment in the script — sed's global replace would rewrite it,\n  # same class of bug as C2 in v0.3.6.\n  pkg_version=$(basename \"$out\" | sed 's/.*-bubblewrap-jail-//')\n  sed -i \"s|@VERSION@|$pkg_version|g\" $out/bin/bubblewrap-jail\n",
-        "runtime-packages": [
-          "bubblewrap"
-        ],
-        "sandbox": "pure",
-        "version": "0.4.7",
-        "description": "Opinionated bubblewrap wrapper: run/agent subcommands, secure-by-default defaults"
-      }
     }
   },
   "packages": [
@@ -195,72 +170,6 @@
       "priority": 5
     },
     {
-      "attr_path": "gcc",
-      "broken": false,
-      "derivation": "/nix/store/97y2g0zkxi71g1v6c0gi1wfgnginv2r0-gcc-wrapper-15.2.0.drv",
-      "description": "GNU Compiler Collection, version 15.2.0 (wrapper script)",
-      "install_id": "gcc",
-      "license": "GPL-3.0-or-later",
-      "locked_url": "https://github.com/flox/nixpkgs?rev=4c1018dae018162ec878d42fec712642d214fdfa",
-      "name": "gcc-wrapper-15.2.0",
-      "pname": "gcc",
-      "rev": "4c1018dae018162ec878d42fec712642d214fdfa",
-      "rev_count": 977467,
-      "rev_date": "2026-04-09T04:48:10Z",
-      "scrape_date": "2026-04-11T06:35:00.143992Z",
-      "stabilities": [
-        "unstable"
-      ],
-      "unfree": false,
-      "version": "15.2.0",
-      "outputs_to_install": [
-        "man",
-        "out",
-        "out"
-      ],
-      "outputs": {
-        "info": "/nix/store/zq0lwn9ai4q1jcfkrrc98cia15yp9zv2-gcc-wrapper-15.2.0-info",
-        "man": "/nix/store/3sbhv99id58xjminaqr8m6dq1h6zvfcp-gcc-wrapper-15.2.0-man",
-        "out": "/nix/store/waack2w5n0208w1qy7pxnwxbsq2n26vm-gcc-wrapper-15.2.0"
-      },
-      "system": "aarch64-linux",
-      "group": "toplevel",
-      "priority": 5
-    },
-    {
-      "attr_path": "gcc",
-      "broken": false,
-      "derivation": "/nix/store/lsh3l4h6f89bxqgmx0jglc14cagfin9z-gcc-wrapper-15.2.0.drv",
-      "description": "GNU Compiler Collection, version 15.2.0 (wrapper script)",
-      "install_id": "gcc",
-      "license": "GPL-3.0-or-later",
-      "locked_url": "https://github.com/flox/nixpkgs?rev=4c1018dae018162ec878d42fec712642d214fdfa",
-      "name": "gcc-wrapper-15.2.0",
-      "pname": "gcc",
-      "rev": "4c1018dae018162ec878d42fec712642d214fdfa",
-      "rev_count": 977467,
-      "rev_date": "2026-04-09T04:48:10Z",
-      "scrape_date": "2026-04-11T07:39:14.354890Z",
-      "stabilities": [
-        "unstable"
-      ],
-      "unfree": false,
-      "version": "15.2.0",
-      "outputs_to_install": [
-        "man",
-        "out",
-        "out"
-      ],
-      "outputs": {
-        "info": "/nix/store/gzq6x9nsc2g1b4z0xlxnl3n8ahzcrgql-gcc-wrapper-15.2.0-info",
-        "man": "/nix/store/n58glhbv7fnb3bqvbdh6ib7pv456cm4n-gcc-wrapper-15.2.0-man",
-        "out": "/nix/store/hb2bs5fg5wkm04x565737qd5nh2hy5nk-gcc-wrapper-15.2.0"
-      },
-      "system": "x86_64-linux",
-      "group": "toplevel",
-      "priority": 5
-    },
-    {
       "attr_path": "jq",
       "broken": false,
       "derivation": "/nix/store/r7xkf6ii1frn2kcdwb48mbwbvikldhmy-jq-1.8.1.drv",
@@ -334,74 +243,6 @@
       "priority": 5
     },
     {
-      "attr_path": "libseccomp",
-      "broken": false,
-      "derivation": "/nix/store/3mscd36mapv4gi0ijvmrq14045s92vvx-libseccomp-2.6.0.drv",
-      "description": "High level library for the Linux Kernel seccomp filter",
-      "install_id": "libseccomp",
-      "license": "LGPL-2.1-only",
-      "locked_url": "https://github.com/flox/nixpkgs?rev=4c1018dae018162ec878d42fec712642d214fdfa",
-      "name": "libseccomp-2.6.0",
-      "pname": "libseccomp",
-      "rev": "4c1018dae018162ec878d42fec712642d214fdfa",
-      "rev_count": 977467,
-      "rev_date": "2026-04-09T04:48:10Z",
-      "scrape_date": "2026-04-11T06:35:25.057804Z",
-      "stabilities": [
-        "unstable"
-      ],
-      "unfree": false,
-      "version": "2.6.0",
-      "outputs_to_install": [
-        "man",
-        "out"
-      ],
-      "outputs": {
-        "dev": "/nix/store/isjs0ayynk4yd3rr7fzhn34iw8vr61xc-libseccomp-2.6.0-dev",
-        "lib": "/nix/store/v0agxcfab5jm5smq1cvcbnj6acqycy52-libseccomp-2.6.0-lib",
-        "man": "/nix/store/2ilhw0hh8gilya0nqqv3dsd6j8mi774r-libseccomp-2.6.0-man",
-        "out": "/nix/store/ba8sg4binyn7sci29a951fba0jb191x6-libseccomp-2.6.0",
-        "pythonsrc": "/nix/store/wn0jq3i8d7fzv39yw1zxpvbcgvznmnrw-libseccomp-2.6.0-pythonsrc"
-      },
-      "system": "aarch64-linux",
-      "group": "toplevel",
-      "priority": 5
-    },
-    {
-      "attr_path": "libseccomp",
-      "broken": false,
-      "derivation": "/nix/store/bcixfwdfgdsbk0yxls3gma2mxq1nlyhj-libseccomp-2.6.0.drv",
-      "description": "High level library for the Linux Kernel seccomp filter",
-      "install_id": "libseccomp",
-      "license": "LGPL-2.1-only",
-      "locked_url": "https://github.com/flox/nixpkgs?rev=4c1018dae018162ec878d42fec712642d214fdfa",
-      "name": "libseccomp-2.6.0",
-      "pname": "libseccomp",
-      "rev": "4c1018dae018162ec878d42fec712642d214fdfa",
-      "rev_count": 977467,
-      "rev_date": "2026-04-09T04:48:10Z",
-      "scrape_date": "2026-04-11T07:39:39.078515Z",
-      "stabilities": [
-        "unstable"
-      ],
-      "unfree": false,
-      "version": "2.6.0",
-      "outputs_to_install": [
-        "man",
-        "out"
-      ],
-      "outputs": {
-        "dev": "/nix/store/w82cmnfsjrdjikkrhcfc10416hlzm6di-libseccomp-2.6.0-dev",
-        "lib": "/nix/store/fgazg1ci420wj8sp0psjc4z9jlri293s-libseccomp-2.6.0-lib",
-        "man": "/nix/store/3xmljzh6vgb5i25y2gai0q84xbdkn46z-libseccomp-2.6.0-man",
-        "out": "/nix/store/gwaivxwybxjrnrb8qrl0zbndn2knkz31-libseccomp-2.6.0",
-        "pythonsrc": "/nix/store/wgvpgn8m1c8l1gqk85d518f5bxmz0jns-libseccomp-2.6.0-pythonsrc"
-      },
-      "system": "x86_64-linux",
-      "group": "toplevel",
-      "priority": 5
-    },
-    {
       "attr_path": "perl",
       "broken": false,
       "derivation": "/nix/store/df7z6m9q8n4nkx3bnkfjdv56a4d7nd6m-perl-5.42.0.drv",
@@ -466,72 +307,6 @@
         "devdoc": "/nix/store/g23yagyyn72gabllw2layi4xyki57cg6-perl-5.42.0-devdoc",
         "man": "/nix/store/chvmqqzf9wfsmipivrbr395ndfhh2haw-perl-5.42.0-man",
         "out": "/nix/store/phnk1lwy8xs0yrbrcs6l2mb9yr9c2knp-perl-5.42.0"
-      },
-      "system": "x86_64-linux",
-      "group": "toplevel",
-      "priority": 5
-    },
-    {
-      "attr_path": "pkg-config",
-      "broken": false,
-      "derivation": "/nix/store/r0ibplv3qh6rzbsdjlrx56dxzijjrrjy-pkg-config-wrapper-0.29.2.drv",
-      "description": "Tool that allows packages to find out information about other packages (wrapper script)",
-      "install_id": "pkg-config",
-      "license": "GPL-2.0-or-later",
-      "locked_url": "https://github.com/flox/nixpkgs?rev=4c1018dae018162ec878d42fec712642d214fdfa",
-      "name": "pkg-config-wrapper-0.29.2",
-      "pname": "pkg-config",
-      "rev": "4c1018dae018162ec878d42fec712642d214fdfa",
-      "rev_count": 977467,
-      "rev_date": "2026-04-09T04:48:10Z",
-      "scrape_date": "2026-04-11T06:35:54.746115Z",
-      "stabilities": [
-        "unstable"
-      ],
-      "unfree": false,
-      "version": "0.29.2",
-      "outputs_to_install": [
-        "man",
-        "out",
-        "out"
-      ],
-      "outputs": {
-        "doc": "/nix/store/2lq06wb2lylkzp62iy6cdxf82mc6wyr3-pkg-config-wrapper-0.29.2-doc",
-        "man": "/nix/store/akl65aihn0wi606lhp2mhwcv15cdirkm-pkg-config-wrapper-0.29.2-man",
-        "out": "/nix/store/fs0gwnv2clqgf23rrlmy7hpdxxi8dipv-pkg-config-wrapper-0.29.2"
-      },
-      "system": "aarch64-linux",
-      "group": "toplevel",
-      "priority": 5
-    },
-    {
-      "attr_path": "pkg-config",
-      "broken": false,
-      "derivation": "/nix/store/41c5s0jfm2ymy6zygf41mvww7lspjs59-pkg-config-wrapper-0.29.2.drv",
-      "description": "Tool that allows packages to find out information about other packages (wrapper script)",
-      "install_id": "pkg-config",
-      "license": "GPL-2.0-or-later",
-      "locked_url": "https://github.com/flox/nixpkgs?rev=4c1018dae018162ec878d42fec712642d214fdfa",
-      "name": "pkg-config-wrapper-0.29.2",
-      "pname": "pkg-config",
-      "rev": "4c1018dae018162ec878d42fec712642d214fdfa",
-      "rev_count": 977467,
-      "rev_date": "2026-04-09T04:48:10Z",
-      "scrape_date": "2026-04-11T07:40:12.232244Z",
-      "stabilities": [
-        "unstable"
-      ],
-      "unfree": false,
-      "version": "0.29.2",
-      "outputs_to_install": [
-        "man",
-        "out",
-        "out"
-      ],
-      "outputs": {
-        "doc": "/nix/store/ipyf6xmsjhs0nrl5vpmgwrxl94sp31b1-pkg-config-wrapper-0.29.2-doc",
-        "man": "/nix/store/mqbmjcz3vv9gzaffi1bcpmwci9nkhq87-pkg-config-wrapper-0.29.2-man",
-        "out": "/nix/store/d0immrndpxnhx32vcfbxngmnf7hmqyc3-pkg-config-wrapper-0.29.2"
       },
       "system": "x86_64-linux",
       "group": "toplevel",
