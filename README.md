@@ -69,9 +69,11 @@ policy and can re-expose anything; the defaults are policy, not a guarantee.
 
 ## Building
 
-This is a Flox build with `sandbox = "pure"` — only git-tracked files are
-visible inside the build sandbox, no network access, build inputs come from
-`[install]` packages.
+The build is a Flox nix-expression at [`.flox/pkgs/bubblewrap-jail.nix`](.flox/pkgs/bubblewrap-jail.nix)
+(a single `stdenv.mkDerivation`). Only git-tracked files are visible inside
+the Nix build sandbox, no network access, build inputs come from the
+expression's function arguments (`{ lib, stdenv, pkg-config, libseccomp,
+shellcheck }`), not from the manifest's `[install]` block.
 
 ```bash
 flox build bubblewrap-jail
@@ -81,14 +83,19 @@ readlink result-bubblewrap-jail   # → /nix/store/HASH-bubblewrap-jail-VERSION
 The build:
 
 1. Runs `shellcheck --severity=style` on the wrapper
-2. Compiles `src/gen-seccomp.c` against libseccomp via `pkg-config`
+2. Compiles `src/gen-seccomp.c` against libseccomp via `$CC` + `pkg-config`
 3. Generates the TIOCSTI BPF blob via the helper
 4. Verifies the BPF size is plausible (32–4096 bytes)
-5. Installs the script and the BPF blob into `$out`
-6. Substitutes the BPF path placeholder in the installed script
+5. Generates the human-readable PFC dump (`gen-seccomp --pfc`)
+6. Installs the script and both blobs into `$out`
+7. Substitutes the `@BPF_PATH@` and `@VERSION@` placeholders in the installed
+   script via `substituteInPlace --replace-fail`
 
-The runtime closure contains only `bubblewrap` — no shellcheck, gcc,
-libseccomp-dev, or pkg-config leakage.
+The runtime closure is tight (6 paths as of v0.5.0: the wrapper itself plus
+its shebang-patched bash and transitive C runtime) — no `shellcheck`, `gcc`,
+`libseccomp-dev`, or `pkg-config` leakage. **`bubblewrap` itself is not in the
+closure**: the wrapper calls `bwrap` via `$PATH` at runtime, so consumer envs
+must install `bubblewrap` alongside `bubblewrap-jail`.
 
 For audit, the package also ships a human-readable dump of the seccomp
 filter at `$out/share/bubblewrap-jail/tiocsti.pfc` (libseccomp's "pseudo
@@ -98,13 +105,18 @@ tooling on the inspecting host.
 
 ## Installing into a consumer Flox environment
 
-Until this is published to a Flox catalog, install via store-path pin:
+Until this is published to a Flox catalog, install via store-path pin.
+Note: as of v0.5.0 the package does **not** bring `bubblewrap` into its
+runtime closure, so the consumer env must install `bubblewrap` explicitly
+alongside it.
 
 ```toml
 # In your consumer Flox env's manifest.toml
 [install]
 bubblewrap-jail.store-path = "/nix/store/HASH-bubblewrap-jail-VERSION"
-bubblewrap-jail.systems   = ["x86_64-linux", "aarch64-linux"]
+bubblewrap-jail.systems    = ["x86_64-linux", "aarch64-linux"]
+bubblewrap.pkg-path        = "bubblewrap"
+bubblewrap.systems         = ["x86_64-linux", "aarch64-linux"]
 ```
 
 After rebuilding, refresh the consumer pin with the new store path and
@@ -117,7 +129,7 @@ bash test/red-team.sh                          # against the built artifact
 bash test/red-team.sh ./src/bubblewrap-jail    # against source (seccomp skipped)
 ```
 
-70 assertions covering filesystem isolation, network policy, privilege
+140 assertions covering filesystem isolation, network policy, privilege
 escape, environment allowlist, project-dir precedence, bind API contract,
 `--passthrough-env` and reserved-name rejection, `--project-as` validation,
 TIOCSTI seccomp blocking, interactive controlling-tty behavior, `--help`

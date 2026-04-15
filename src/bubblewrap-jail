@@ -36,9 +36,15 @@
 
 set -euo pipefail
 
-# Hardcoded rather than $(basename "$0") because Flox wraps installed binaries
-# with a PATH-setup shim named .bubblewrap-jail-wrapped, which would otherwise
-# leak into error messages and --help.
+# Hardcoded rather than $(basename "$0") so --help and error messages always
+# identify this tool as "bubblewrap-jail" regardless of how it was invoked.
+# Historically this defended against pre-v0.5.0 Flox manifest builds, which
+# wrapped the installed binary in a PATH-setup shim and exposed the real
+# script as .bubblewrap-jail-wrapped — without the hardcode, `--help` would
+# have said `Usage: .bubblewrap-jail-wrapped`.  v0.5.0+ nix-expression builds
+# install the real script directly (no shim), so `basename "$0"` would return
+# the right value naturally, but the hardcode stays as a defense against any
+# future re-wrapping and against callers that set argv[0] unusually.
 prog="bubblewrap-jail"
 
 # Path to the precompiled seccomp BPF blob that blocks ioctl(TIOCSTI, ...).

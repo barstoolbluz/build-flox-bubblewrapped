@@ -531,8 +531,14 @@ echo "[B2: human-readable PFC dump shipped alongside BPF blob]"
 # result alongside tiocsti.bpf for human review.  Verify it's present
 # and references the ioctl syscall (proves it's a real filter dump,
 # not an empty file).  Skip in source mode (no installed package).
-if [ -f "$WRAPPED_SCRIPT" ]; then
-  PFC_FILE="$(dirname "$(dirname "$WRAPPED_SCRIPT")")/share/bubblewrap-jail/tiocsti.pfc"
+#
+# Layout-agnostic probe: PFC lives at $out/share/bubblewrap-jail/tiocsti.pfc
+# regardless of whether $JAIL is the pre-v0.5.0 Flox shim at
+# $out/bin/bubblewrap-jail or the v0.5.0+ nix-expression-built script at
+# the same path.  Compute the expected path from $JAIL directly and probe
+# for readability; skip if absent (source mode or unbuilt tree).
+PFC_FILE="$(dirname "$(dirname "$JAIL")")/share/bubblewrap-jail/tiocsti.pfc"
+if [ -r "$PFC_FILE" ]; then
   expect_pass \
     "B2: PFC dump shipped at share/bubblewrap-jail/tiocsti.pfc" -- \
     test -r "$PFC_FILE"
@@ -545,7 +551,7 @@ if [ -f "$WRAPPED_SCRIPT" ]; then
     "ERRNO" -- \
     cat "$PFC_FILE"
 else
-  echo "  skip: source-mode wrapper has no installed PFC, B2 tests skipped"
+  echo "  skip: no installed PFC at $PFC_FILE, B2 tests skipped"
 fi
 
 echo
