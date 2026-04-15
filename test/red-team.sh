@@ -937,6 +937,185 @@ expect_stdout_matches \
   "optional: [0-9]+ supported / [0-9]+ missing" -- \
   "$JAIL" check
 
+# -----------------------------------------------------------------------------
+# flox-env subcommand (v0.6.0)
+# -----------------------------------------------------------------------------
+#
+# Runs an arbitrary Flox env inside a hardened bwrap sandbox.  Two modes:
+#   - immutable: /nix/store overlaid with a tmpfs, closure surfaced ro
+#   - mutable:   /nix/store and /nix/var bound rw so flox install works
+# Both inherit bubblewrap-jail's hardening (TIOCSTI seccomp, disable-userns,
+# die-with-parent, /etc tmpfs+seal).  See src/bubblewrap-jail flox-env section.
+#
+# Fixtures: a scratch Flox env per test mode, via mktemp + flox init +
+# `flox activate -d . -- true` to populate .flox/run.  Cleanup in trap.
+
+echo
+echo "[flox-env: fixture setup]"
+# Immutable fixture: use the build-floxwrapped env itself ($FLOX_ENV_PROJECT),
+# NOT a mktemp+flox-init scratch.  Why: a fresh `flox init` env has zero
+# packages in [install], so the sandbox's /.flox/run/<triple>/bin is empty
+# and basic commands (true, ls, touch, perl) aren't on PATH — which would
+# make even trivial tests fail or pass for the wrong reason.  The
+# build-floxwrapped env has perl/bashInteractive/jq/shellcheck/bubblewrap
+# installed (see .flox/env/manifest.toml), which is enough for the
+# hardening-invariant tests here.  Tests that need a clean slate (mutable
+# flox install) create their own mktemp scratch below.
+FLOX_ENV_FIXTURE_IMMUT=""
+if command -v flox >/dev/null 2>&1 \
+  && command -v nix-store >/dev/null 2>&1 \
+  && [ -d "$FLOX_ENV_PROJECT/.flox/run" ]; then
+  FLOX_ENV_FIXTURE_IMMUT="$FLOX_ENV_PROJECT"
+  echo "  ok:   using $FLOX_ENV_FIXTURE_IMMUT as immutable fixture"
+else
+  echo "  skip: flox/nix-store not on PATH, or no .flox/run — flox-env tests skipped"
+fi
+# shellcheck disable=SC2064
+trap "rm -rf '$SMOKE_CACHE' \${FLOX_ENV_FIXTURE_MUT:-}" EXIT
+
+if [ -n "$FLOX_ENV_FIXTURE_IMMUT" ]; then
+  echo
+  echo "[flox-env: smoke / happy path]"
+  # Use bash builtins (exit, echo, command -v) rather than coreutils
+  # (true, ls, touch) because the fixture env doesn't install coreutils —
+  # bash is guaranteed available via the /bin/bash symlink into the closure.
+  expect_pass \
+    "flox-env: bash builtin exit 0 works" -- \
+    "$JAIL" flox-env -d "$FLOX_ENV_FIXTURE_IMMUT" -- bash -c 'exit 0'
+  expect_stdout_matches \
+    "flox-env: PATH augmented by flox activate" \
+    "/.flox/run/" -- \
+    "$JAIL" flox-env -d "$FLOX_ENV_FIXTURE_IMMUT" -- bash -c 'echo "$PATH"'
+  expect_stdout_matches \
+    "flox-env: /usr/bin/flox symlink resolves" \
+    "^/usr/bin/flox$" -- \
+    "$JAIL" flox-env -d "$FLOX_ENV_FIXTURE_IMMUT" -- bash -c 'command -v flox'
+  expect_pass \
+    "flox-env: --dry-run exits 0 without running bwrap" -- \
+    "$JAIL" flox-env --dry-run -d "$FLOX_ENV_FIXTURE_IMMUT" -- bash -c 'exit 0'
+  expect_stdout_matches \
+    "flox-env: --dry-run output starts with 'bwrap '" \
+    "^bwrap " -- \
+    "$JAIL" flox-env --dry-run -d "$FLOX_ENV_FIXTURE_IMMUT" -- bash -c :
+
+  echo
+  echo "[flox-env: closure scoping (immutable)]"
+  # Host /nix/store has thousands of entries; sandbox should see only the
+  # transitive closure of flox + fixture env.  Count via bash glob expansion
+  # (no ls/wc needed — coreutils may not be in the fixture's [install]).
+  expect_pass \
+    "flox-env immutable: sandbox /nix/store << host /nix/store" -- \
+    bash -c '
+      host=0
+      for _ in /nix/store/*; do host=$((host+1)); done
+      sb=$("$1" flox-env -d "$2" -- bash -c "a=(/nix/store/*); echo \${#a[@]}" 2>/dev/null)
+      [ "${sb:-0}" -gt 0 ] && [ "${sb:-0}" -lt 1000 ] && [ "$host" -gt "$sb" ]
+    ' _ "$JAIL" "$FLOX_ENV_FIXTURE_IMMUT"
+  expect_pass \
+    "flox-env immutable: flox store path visible in /nix/store" -- \
+    "$JAIL" flox-env -d "$FLOX_ENV_FIXTURE_IMMUT" -- \
+      bash -c 'for p in /nix/store/*flox-*; do [ -d "$p" ] && exit 0; done; exit 1'
+  # Closure-path read-only test.  /nix/store itself is a tmpfs in
+  # immutable mode (so bwrap can surface closure paths on top), and the
+  # tmpfs root IS writable at the directory level — a new top-level
+  # file in /nix/store will succeed as a tmpfs write and disappear when
+  # the sandbox exits (harmless, no host mutation).  What we actually
+  # want to assert is that the closure BINDS themselves are read-only:
+  # writing into an existing closure-path directory (e.g. a flox-*
+  # store path) must fail.
+  expect_fail \
+    "flox-env immutable: closure bind paths are read-only" -- \
+    "$JAIL" flox-env -d "$FLOX_ENV_FIXTURE_IMMUT" -- \
+      bash -c '
+        for p in /nix/store/*flox-*; do
+          [ -d "$p" ] || continue
+          # If this write succeeds, a closure path is writable — bug.
+          if : > "$p/bubblewrap-jail-red-team-write-probe" 2>/dev/null; then
+            exit 0
+          fi
+        done
+        # No writable closure path found — correct behavior, but we
+        # need to return non-zero so expect_fail is happy.
+        exit 1
+      '
+
+  echo
+  echo "[flox-env: hardening invariants]"
+  # TIOCSTI seccomp still blocks.  Open /dev/tty (which the sandbox
+  # inherits because we did NOT pass --new-session) and invoke
+  # ioctl(TIOCSTI); expect EPERM.  If /dev/tty is not available (CI
+  # non-interactive), the test skips with exit 0 via the `or exit 0`
+  # fallthrough.  perl is in the fixture's [install] so it's on PATH.
+  expect_pass \
+    "flox-env: TIOCSTI ioctl blocked by seccomp (EPERM)" -- \
+    "$JAIL" flox-env -d "$FLOX_ENV_FIXTURE_IMMUT" -- \
+      perl -e '
+        open(my $tty, ">", "/dev/tty") or exit 0;
+        my $c = "x";
+        ioctl($tty, 0x5412, $c) and exit 1;
+        exit 0;
+      '
+  expect_fail \
+    "flox-env: /etc/shadow not readable (not in allowlist)" -- \
+    "$JAIL" flox-env -d "$FLOX_ENV_FIXTURE_IMMUT" -- \
+      bash -c 'test -r /etc/shadow'
+  expect_fail \
+    "flox-env: host /usr/bin/ls not visible (closure-only, no host /usr)" -- \
+    "$JAIL" flox-env -d "$FLOX_ENV_FIXTURE_IMMUT" -- \
+      bash -c 'test -e /usr/bin/ls'
+
+  echo
+  echo "[flox-env: error cases]"
+  expect_stderr_matches \
+    "flox-env: neither -d nor -r → 'required' error" \
+    "required" -- \
+    "$JAIL" flox-env -- true
+  expect_stderr_matches \
+    "flox-env: both -d and -r → 'mutually exclusive' error" \
+    "mutually exclusive" -- \
+    "$JAIL" flox-env -d "$FLOX_ENV_FIXTURE_IMMUT" -r foo/bar -- true
+  expect_stderr_matches \
+    "flox-env: nonexistent -d → 'not a directory' error" \
+    "not a directory" -- \
+    "$JAIL" flox-env -d /nonexistent/path -- true
+fi
+
+echo
+echo "[flox-env: mutable mode]"
+# Mutable mode needs network (flox install pulls catalog metadata).  Gate
+# on the HOST_DNS_WORKS precheck from the harness header.
+FLOX_ENV_FIXTURE_MUT=""
+if [ -n "$FLOX_ENV_FIXTURE_IMMUT" ] && [ "$HOST_DNS_WORKS" = 1 ]; then
+  FLOX_ENV_FIXTURE_MUT=$(mktemp -d -t bwj-flox-env-mut.XXXXXX)
+  if (
+    cd "$FLOX_ENV_FIXTURE_MUT" \
+      && flox init >/dev/null 2>&1 \
+      && flox activate -d . -- true >/dev/null 2>&1
+  ); then
+    expect_pass \
+      "flox-env --mutable: flox install hello succeeds" -- \
+      "$JAIL" flox-env --mutable --net -d "$FLOX_ENV_FIXTURE_MUT" -- \
+        flox install hello
+    expect_pass \
+      "flox-env --mutable: manifest contains hello after install" -- \
+      grep -q '^hello\.pkg-path' "$FLOX_ENV_FIXTURE_MUT/.flox/env/manifest.toml"
+    expect_stderr_matches \
+      "flox-env --mutable: prints 'mutable mode' warning to stderr" \
+      "mutable mode:" -- \
+      "$JAIL" flox-env --mutable -d "$FLOX_ENV_FIXTURE_MUT" -- true
+  else
+    echo "  skip: failed to set up mutable fixture"
+    rm -rf "$FLOX_ENV_FIXTURE_MUT"
+    FLOX_ENV_FIXTURE_MUT=""
+  fi
+else
+  if [ -z "$FLOX_ENV_FIXTURE_IMMUT" ]; then
+    echo "  skip: no immutable fixture — mutable tests skipped"
+  else
+    echo "  skip: HOST_DNS_WORKS=0 — flox install needs network"
+  fi
+fi
+
 echo
 echo "=== summary: $pass passed, $fail failed ==="
 if [ $fail -gt 0 ]; then

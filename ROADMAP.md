@@ -284,6 +284,23 @@ permits.
 
 ### 10. UX
 
+- **FX1. `[DONE]` Flox environment sandboxing subcommand.**
+  New `bubblewrap-jail flox-env` subcommand that runs arbitrary Flox
+  environments (local `-d DIR` or remote catalog `-r OWNER/NAME`) inside
+  a hardened bwrap sandbox.  Inherits all existing hardening (TIOCSTI
+  seccomp, `--disable-userns`, `--die-with-parent`, `/etc` seal), adds
+  closure-scoped `/nix/store` visibility via `--tmpfs /nix/store` overlay
+  + per-path `--ro-bind` (immutable, default), or `--mutable` for full
+  `/nix/store` rw + `/nix/var` rw so `flox install` can mutate the env
+  via the nix daemon.  Synthesizes `/bin`, `/usr/bin/flox` via tmpfs +
+  symlink pattern.  Optional `--x11`, `--gpu`, `--dev-shm`, `--dry-run`
+  flags.  Runtime deps `nix-store` + `flox` reported as OPT probes by
+  `check`.  Inspired by devusb/flox-bwrap; see ACKNOWLEDGMENTS.md.
+  **Landed in v0.6.0.** Tests: 16 new red-team assertions.
+  **Known limitation:** source-build installs in mutable mode fail
+  (nix-build uses its own userns sandbox which can't nest under
+  `--disable-userns`); cache-hit installs work fine.
+
 - **U1. `[PARTIAL]` A `doctor` / `check --verbose` mode.**
   The existing `check` subcommand already prints every item on the
   reviewer's list:
@@ -350,15 +367,17 @@ recommended sections shipped between v0.2.5 and v0.3.2.  **Done.**
 
 | # | Item | Status | Lands in |
 |---|------|--------|----------|
-| L1 | `--lock-file` for supervisors | DONE (same as V1) | v0.2.7 |
-| L2 | `--sync-fd` for liveness signal | DONE (same as V1) | v0.2.7 |
-| D1 | Opt-in `syncfs()` flush for rw modes | TODO | — |
-| U1 | `doctor` / `check --verbose` mode | PARTIAL | existing `check` covers content; no `--verbose`/`--json`/`doctor` alias |
+| L1  | `--lock-file` for supervisors | DONE (same as V1) | v0.2.7 |
+| L2  | `--sync-fd` for liveness signal | DONE (same as V1) | v0.2.7 |
+| D1  | Opt-in `syncfs()` flush for rw modes | TODO | — |
+| U1  | `doctor` / `check --verbose` mode | PARTIAL | existing `check` covers content; no `--verbose`/`--json`/`doctor` alias (json+doctor closed in v0.4.6) |
+| FX1 | `flox-env` subcommand (immutable + mutable) | DONE | v0.6.0 |
 
-Final state as of v0.4.5:
-- red-team **129 / 0** (stable across 10 consecutive runs)
-- check **29 / 0 required, 3 optional supported / 0 missing**
-- runtime closure **35 paths**
+Final state as of v0.6.0:
+- red-team **157 / 0** against built artifact (140 legacy + 16 flox-env + 1 reshuffle)
+- red-team source mode **129 / 5** (5 expected seccomp-gated failures when BPF_PATH is unsubstituted)
+- check **29 / 0 required, 6 optional supported / 0 missing** (3 bwrap flag opts + 3 flox-env runtime-dep opts)
+- run/agent runtime closure **6 paths** (shebang-patched bash + glibc + libs)
 - BPF blob **104 bytes**
 - shellcheck clean
 - CI green on ubuntu-24.04

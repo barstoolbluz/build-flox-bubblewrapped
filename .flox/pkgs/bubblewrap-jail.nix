@@ -22,7 +22,7 @@
 
 stdenv.mkDerivation (finalAttrs: {
   pname = "bubblewrap-jail";
-  version = "0.5.1";
+  version = "0.6.0";
 
   # Project root.  Flox's nix-expression builds run inside the Nix sandbox,
   # which means only git-tracked files are visible — same constraint the

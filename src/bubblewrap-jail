@@ -71,6 +71,13 @@ Usage: $prog <subcommand> [options] -- CMD [ARGS...]
 Subcommands:
   run       Jail a command.  Minimal filesystem view, no project binding.
   agent     Jail an agent.   Project dir rw, persistent agent home.
+  flox-env  Jail a Flox environment as a hardened container.  The sandbox
+            sees only the Flox env's closure (immutable mode) or the full
+            /nix/store rw (mutable mode, --mutable).  The env is activated
+            via \`flox activate\` inside the sandbox.  Requires nix-store
+            and flox on PATH at invocation time (not inside the sandbox).
+            Pass \`-d DIR\` for a local env or \`-r OWNER/NAME\` for a remote
+            Flox catalog env.  See \"flox-env options\" below.
   check     Probe the host for required bwrap/kernel features.  Reports
             PASS/FAIL/OPT per check and exits 0 (all required green) or
             1 (anything required red).  Optional features report on OPT
@@ -148,6 +155,36 @@ Agent-only options:
                     separated list, e.g. \"A,B,C\") or ANTHROPIC_API_KEY.
                     Reserved names that the jail manages itself (PATH,
                     HOME, TMPDIR, TERM, LANG, PWD) are rejected per-entry.
+                    Also valid in flox-env mode.
+
+flox-env-only options:
+  -d DIR            Local Flox environment directory.  Must contain a
+                    .flox/run/ directory (run \`flox activate\` there once
+                    first to populate it).  Mutually exclusive with -r.
+  -r OWNER/NAME     Remote Flox catalog environment.  The wrapper runs
+                    \`flox pull -r OWNER/NAME\` before setting up the sandbox.
+                    Requires flox auth (\`flox auth login\`) for private
+                    envs.  Mutually exclusive with -d.
+  --mutable         Bind /nix/store and /nix/var read-write.  Required for
+                    \`flox install\` inside the sandbox.  SECURITY TRADE-OFF:
+                    exposes the full host /nix/store and lets the sandbox
+                    mutate the host nix database via the daemon socket.
+                    Default: immutable (closure-scoped, read-only).
+                    Limitation: source-build installs (non-cache-hit) fail
+                    because nix-build uses its own userns-based sandbox,
+                    which cannot nest under --disable-userns.
+  --x11             Bind the X socket at /tmp/.X11-unix/X\$DISPLAY_NUM and
+                    \$HOME/.Xauthority.  Exposes the host X server to the
+                    sandbox; only use with trusted content.
+  --gpu             Bind /dev/dri, /sys/dev/char, /sys/devices/pci0000:00,
+                    and /run/opengl-driver.  For ML/CUDA workloads.
+  --dev-shm         Bind /dev/shm rw (databases, SHM IPC).
+  --dry-run         Print the bwrap argv that would be executed and exit
+                    without running bwrap.  Useful for auditing the sandbox
+                    policy before committing to it.
+  --no-activate     Skip the \`flox activate\` wrapper and run the command
+                    directly inside the sandbox.  For debugging the sandbox
+                    structure itself; most use cases want the default.
 
 Environment variables (used as defaults; flags override):
   BUBBLEWRAP_JAIL_NET             0|1    (default: 0 for run, 1 for agent)
@@ -296,6 +333,35 @@ run_check() {
       fi
     fi
   }
+  # opt_external NAME STATUS DETAIL — record an optional external-tool
+  # probe (separate from the bwrap-feature opt_msg above).  Used by the
+  # flox-env subcommand's runtime-dep probes: nix-store, flox CLI, /etc/nix.
+  # NAME is the full probe name stored in JSON; DETAIL is the text-mode
+  # annotation appended after the name.
+  opt_external() {
+    local name=$1 status=$2 detail=$3
+    if [ "$status" = "present" ]; then
+      probe_names+=("$name"); probe_statuses+=("opt_supported")
+      opt_present=$((opt_present+1))
+      if [ "$output_format" = text ]; then
+        if [ -n "$detail" ]; then
+          printf '  OPT   %s  (%s)\n' "$name" "$detail"
+        else
+          printf '  OPT   %s\n' "$name"
+        fi
+      fi
+    else
+      probe_names+=("$name"); probe_statuses+=("opt_missing")
+      opt_missing=$((opt_missing+1))
+      if [ "$output_format" = text ]; then
+        if [ -n "$detail" ]; then
+          printf '  OPT   %s  (missing — %s)\n' "$name" "$detail"
+        else
+          printf '  OPT   %s  (missing)\n' "$name"
+        fi
+      fi
+    fi
+  }
 
   # JSON string escaper: handles backslash, double quote, and control
   # characters (newline, tab, carriage return).  Our probe data is
@@ -430,6 +496,31 @@ run_check() {
     fi
   done
 
+  # flox-env runtime deps (OPT — only needed for the flox-env subcommand).
+  # These don't affect the exit code; missing just means flox-env won't work
+  # on this host.  The probes live here so `bubblewrap-jail check` tells
+  # users upfront whether flox-env is usable.
+  if command -v nix-store >/dev/null 2>&1; then
+    opt_external "flox-env: nix-store available" present "$(command -v nix-store)"
+  else
+    opt_external "flox-env: nix-store available" missing \
+      "required for closure computation in flox-env immutable mode"
+  fi
+  if command -v flox >/dev/null 2>&1; then
+    _flox_ver=$(flox --version 2>/dev/null | awk '{print $NF; exit}')
+    opt_external "flox-env: flox CLI available" present "${_flox_ver:-unknown version}"
+    unset _flox_ver
+  else
+    opt_external "flox-env: flox CLI available" missing \
+      "required by the flox-env subcommand"
+  fi
+  if [ -d /etc/nix ]; then
+    opt_external "flox-env: /etc/nix present" present ""
+  else
+    opt_external "flox-env: /etc/nix present" missing \
+      "activation inside flox-env sandbox will fail without /etc/nix"
+  fi
+
   # Kernel sysctls / caps
   if [ -r /proc/sys/user/max_user_namespaces ]; then
     mun=$(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo 0)
@@ -496,6 +587,120 @@ run_check() {
 }
 
 # -----------------------------------------------------------------------------
+# flox-env helper functions
+# -----------------------------------------------------------------------------
+#
+# Used only by the flox-env subcommand.  The env-resolution and closure-
+# computation patterns below are ported (concept, not code) from
+# devusb/flox-bwrap (MIT) — specifically the logic in its paths.go.  See
+# ACKNOWLEDGMENTS.md for details.  We re-implement in bash so the wrapper
+# stays self-contained and auditable as one file.
+#
+# Runtime dependencies (checked by the check subcommand as OPT probes):
+#   - nix-store    for closure computation
+#   - flox         for `flox pull` on remote envs
+
+# resolve_local_env DIR
+#   Emit the absolute store-path targets of each .flox/run/* symlink in DIR.
+#   Bubblewrap-jail's own working tree is NOT a valid target here unless
+#   `flox activate` has been run there at least once to populate .flox/run/.
+resolve_local_env() {
+  local env_dir=$1 abs_dir run_dir entry target
+  [ -d "$env_dir" ] || die "flox-env: local env not a directory: $env_dir"
+  abs_dir=$(cd "$env_dir" && pwd -P)
+  run_dir="$abs_dir/.flox/run"
+  [ -d "$run_dir" ] || die "flox-env: no .flox/run in $abs_dir (run 'flox activate' there once first to populate it)"
+  local matched=0
+  for entry in "$run_dir"/*; do
+    [ -L "$entry" ] || continue
+    target=$(readlink -f "$entry" 2>/dev/null) || continue
+    case "$target" in
+      /nix/store/*) printf '%s\n' "$target"; matched=1 ;;
+    esac
+  done
+  [ "$matched" = 1 ] || die "flox-env: no valid /nix/store run symlinks in $run_dir"
+}
+
+# resolve_remote_env OWNER/NAME
+#   Run `flox pull` to fetch the env, then emit the store-path targets of
+#   matching symlinks under ~/.cache/flox/run/<owner>/.  Matches flox-bwrap's
+#   parseRemoteEnvRequisites pattern (paths.go:76-128) at the env-resolution
+#   level, but we don't call nix-store here — closure computation is the
+#   caller's job.
+resolve_remote_env() {
+  local ref=$1 owner name run_dir entry target
+  case "$ref" in
+    */*) owner=${ref%%/*}; name=${ref#*/} ;;
+    *)   die "flox-env: --remote-env expected owner/name, got: $ref" ;;
+  esac
+  command -v flox >/dev/null 2>&1 \
+    || die "flox-env: flox CLI not on PATH (required to pull remote env $ref)"
+  # flox pull writes to stdout; redirect to stderr so our own stdout stays
+  # clean for the store-path output.  On failure, surface flox's own error.
+  if ! flox pull -r "$ref" >&2; then
+    die "flox-env: flox pull failed for $ref"
+  fi
+  run_dir="${HOME:-/tmp}/.cache/flox/run/$owner"
+  [ -d "$run_dir" ] \
+    || die "flox-env: no ~/.cache/flox/run/$owner after pull (flox layout changed?)"
+  local matched=0
+  for entry in "$run_dir"/*; do
+    [ -L "$entry" ] || continue
+    # Match "x86_64-linux.<name>.dev", ".run" and similar per-system forms.
+    # We filter by the ".<name>." substring in the basename rather than a
+    # stricter regex so we tolerate future layout changes without breaking.
+    case "${entry##*/}" in
+      *".$name."*) ;;
+      *) continue ;;
+    esac
+    target=$(readlink -f "$entry" 2>/dev/null) || continue
+    case "$target" in
+      /nix/store/*) printf '%s\n' "$target"; matched=1 ;;
+    esac
+  done
+  [ "$matched" = 1 ] || die "flox-env: no run symlinks for $ref in $run_dir"
+}
+
+# compute_closure PATH...
+#   For each input store path, emit its transitive runtime closure via
+#   nix-store --query --requisites.  Concatenates all results and dedups
+#   via sort -u.  Port of flox-bwrap's getNixRequisites + dedup pattern
+#   (paths.go:57-73, 174-184).
+#
+#   Errors out via die if nix-store is missing or fails, so callers can
+#   trust the emitted list is complete.
+compute_closure() {
+  command -v nix-store >/dev/null 2>&1 \
+    || die "flox-env: nix-store not on PATH (required for closure computation)"
+  local p chunk all=""
+  for p in "$@"; do
+    if ! chunk=$(nix-store --query --requisites "$p" 2>&1); then
+      die "flox-env: nix-store --query --requisites failed for $p: $chunk"
+    fi
+    all+="$chunk"$'\n'
+  done
+  printf '%s' "$all" | sort -u
+}
+
+# find_bash_in_closure PATH...
+#   Emit the first closure path whose bin/bash is executable, as
+#   "<path>/bin/bash".  Used to build /bin/sh and /bin/bash symlinks that
+#   resolve into the Flox env's closure rather than host /bin.  Port of
+#   the loop in flox-bwrap's paths.go:40-47.
+#   Returns 1 with an empty stdout if nothing matches — caller must die
+#   with a meaningful error.
+find_bash_in_closure() {
+  local p
+  for p in "$@"; do
+    if [ -x "$p/bin/bash" ]; then
+      printf '%s/bin/bash\n' "$p"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# -----------------------------------------------------------------------------
 # Parse subcommand
 # -----------------------------------------------------------------------------
 
@@ -505,7 +710,7 @@ if [ "$#" -lt 1 ]; then
 fi
 
 case "$1" in
-  run|agent)    cmd=$1; shift ;;
+  run|agent|flox-env) cmd=$1; shift ;;
   check|doctor) shift; run_check "$@"; exit $? ;;
   -h|--help)    usage; exit 0 ;;
   *)            usage >&2; die "unknown subcommand: $1" ;;
@@ -531,6 +736,14 @@ lock_file=""              # --lock-file PATH passthrough (V1)
 sync_fd=""                # --sync-fd FD  passthrough (V1)
 info_fd=""                # --info-fd FD  passthrough (observability)
 bind_force=0              # --bind-force opts out of essential-dst guard (F2)
+local_env=""              # flox-env: -d DIR (local Flox env directory)
+remote_env=""             # flox-env: -r owner/name (remote Flox catalog env)
+mutable=0                 # flox-env: --mutable (bind /nix/store + /nix/var rw)
+x11=0                     # flox-env: --x11 (bind X socket + Xauthority)
+gpu=0                     # flox-env: --gpu (bind /dev/dri + PCI + opengl-driver)
+dev_shm=0                 # flox-env: --dev-shm (--dev-bind /dev/shm)
+dry_run=0                 # flox-env: --dry-run (print argv and exit)
+no_activate=0             # flox-env: --no-activate (skip flox activate wrapper)
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -605,6 +818,17 @@ while [ "$#" -gt 0 ]; do
                        die "--info-fd cannot be 10 or 11 (reserved by wrapper for seccomp BPF)"
                      fi
                      info_fd=$2; shift 2 ;;
+    # flox-env subcommand options
+    -d)              [ "$#" -ge 2 ] || die "-d needs DIR"
+                     local_env=$2; shift 2 ;;
+    -r)              [ "$#" -ge 2 ] || die "-r needs OWNER/NAME"
+                     remote_env=$2; shift 2 ;;
+    --mutable)       mutable=1; shift ;;
+    --x11)           x11=1; shift ;;
+    --gpu)           gpu=1; shift ;;
+    --dev-shm)       dev_shm=1; shift ;;
+    --dry-run)       dry_run=1; shift ;;
+    --no-activate)   no_activate=1; shift ;;
     -h|--help)       usage; exit 0 ;;
     --)              shift; break ;;
     -*)              usage >&2; die "unknown option: $1" ;;
@@ -639,12 +863,49 @@ unset _pte
 # --passthrough-env needs its own tracking boolean because passthrough_envs
 # always has a non-empty default, so we can't distinguish "user set it" from
 # "default applied" by array emptiness.
+#
+# Note: the "agent-only" error-message strings for --project, --project-as,
+# --agent-home, --project-ro, and --passthrough-env are load-bearing for the
+# red-team test suite (test/red-team.sh anchors on them).  Keep them verbatim.
+# --passthrough-env is also valid in flox-env mode, so its rejection is
+# run-only, not agent+flox-env.
 if [ "$cmd" = "run" ]; then
   [ -z "$project"    ] || die "--project is agent-only"
   [ -z "$project_as" ] || die "--project-as is agent-only"
   [ -z "$agent_home" ] || die "--agent-home is agent-only"
   [ "$project_ro" = 0 ] || die "--project-ro is agent-only"
   [ "$passthrough_envs_set_by_flag" = 0 ] || die "--passthrough-env is agent-only"
+fi
+
+# flox-env also rejects the agent project/home flags (they don't apply — the
+# "project" in flox-env is the Flox env itself, and the home is a tmpfs).
+if [ "$cmd" = "flox-env" ]; then
+  [ -z "$project"    ] || die "--project is agent-only"
+  [ -z "$project_as" ] || die "--project-as is agent-only"
+  [ -z "$agent_home" ] || die "--agent-home is agent-only"
+  [ "$project_ro" = 0 ] || die "--project-ro is agent-only"
+fi
+
+# Reject flox-env-only flags outside flox-env mode.
+if [ "$cmd" != "flox-env" ]; then
+  [ -z "$local_env"  ] || die "-d is flox-env-only"
+  [ -z "$remote_env" ] || die "-r is flox-env-only"
+  [ "$mutable"     = 0 ] || die "--mutable is flox-env-only"
+  [ "$x11"         = 0 ] || die "--x11 is flox-env-only"
+  [ "$gpu"         = 0 ] || die "--gpu is flox-env-only"
+  [ "$dev_shm"     = 0 ] || die "--dev-shm is flox-env-only"
+  [ "$dry_run"     = 0 ] || die "--dry-run is flox-env-only"
+  [ "$no_activate" = 0 ] || die "--no-activate is flox-env-only"
+fi
+
+# flox-env: require exactly one of -d or -r
+if [ "$cmd" = "flox-env" ]; then
+  if [ -n "$local_env" ] && [ -n "$remote_env" ]; then
+    die "flox-env: -d and -r are mutually exclusive"
+  fi
+  if [ -z "$local_env" ] && [ -z "$remote_env" ]; then
+    die "flox-env: -d DIR or -r OWNER/NAME required"
+  fi
 fi
 
 # F2: validate user --bind / --ro-bind destinations.  Reject paths that
@@ -746,9 +1007,115 @@ if [ "$cmd" = "agent" ]; then
 fi
 
 # -----------------------------------------------------------------------------
+# flox-env defaults resolution
+# -----------------------------------------------------------------------------
+#
+# Resolve the target Flox env (local or remote), compute its runtime closure
+# via nix-store --query --requisites, and find bash inside the closure.
+# Results are stashed in flox_env_closure, flox_env_bash, flox_env_flox_bin,
+# and flox_env_project_local for use by the fs-layout and exec blocks below.
+#
+# In mutable mode we still resolve the env path (for /.flox binding) but
+# skip the closure computation — /nix/store is bound rw so there's no need
+# to enumerate paths.
+
+flox_env_closure=""
+flox_env_bash=""
+flox_env_flox_bin=""
+flox_env_project_local=""
+
+if [ "$cmd" = "flox-env" ]; then
+  [ -n "${HOME:-}" ] \
+    || die "flox-env: \$HOME not set on host; cannot construct sandbox home"
+
+  command -v flox >/dev/null 2>&1 \
+    || die "flox-env: flox CLI not on PATH"
+  flox_env_flox_bin=$(readlink -f "$(command -v flox)" 2>/dev/null)
+  [ -x "$flox_env_flox_bin" ] \
+    || die "flox-env: resolved flox path not executable: $flox_env_flox_bin"
+
+  # Resolve env seeds.
+  if [ -n "$local_env" ]; then
+    [ -d "$local_env" ] || die "flox-env: local env not a directory: $local_env"
+    flox_env_project_local=$(cd "$local_env" && pwd -P)
+    _flox_seeds=$(resolve_local_env "$local_env")
+  else
+    _flox_seeds=$(resolve_remote_env "$remote_env")
+  fi
+
+  if [ "$mutable" = 1 ]; then
+    # In mutable mode we skip closure enumeration; whole /nix/store is
+    # bound rw.  Still need bash for /bin symlinks, so pick it from the
+    # env's run symlink target directly.
+    _seed_array=()
+    while IFS= read -r _s; do
+      [ -n "$_s" ] && _seed_array+=("$_s")
+    done <<<"$_flox_seeds"
+    # Quick one-seed closure to find bash — cheaper than computing the
+    # full closure, but still deterministic.
+    if [ "${#_seed_array[@]}" -gt 0 ]; then
+      _bash_closure=$(compute_closure "${_seed_array[@]}")
+      _bash_array=()
+      while IFS= read -r _p; do
+        [ -n "$_p" ] && _bash_array+=("$_p")
+      done <<<"$_bash_closure"
+      if ! flox_env_bash=$(find_bash_in_closure "${_bash_array[@]}"); then
+        # Fall back to computing across the flox binary's closure too.
+        _bash_array+=("$flox_env_flox_bin")
+        _bash_closure=$(compute_closure "${_bash_array[@]}")
+        _bash_array=()
+        while IFS= read -r _p; do
+          [ -n "$_p" ] && _bash_array+=("$_p")
+        done <<<"$_bash_closure"
+        flox_env_bash=$(find_bash_in_closure "${_bash_array[@]}") \
+          || die "flox-env: no bin/bash in env closure or flox closure"
+      fi
+      unset _bash_closure _bash_array
+    else
+      die "flox-env: no seed paths resolved from the Flox env"
+    fi
+    unset _seed_array _s _p
+  else
+    # Immutable mode: compute the full closure (flox binary + env seeds).
+    _seed_array=("$flox_env_flox_bin")
+    while IFS= read -r _s; do
+      [ -n "$_s" ] && _seed_array+=("$_s")
+    done <<<"$_flox_seeds"
+    flox_env_closure=$(compute_closure "${_seed_array[@]}")
+
+    # Find bash in the closure.
+    _closure_array=()
+    while IFS= read -r _p; do
+      [ -n "$_p" ] && _closure_array+=("$_p")
+    done <<<"$flox_env_closure"
+    flox_env_bash=$(find_bash_in_closure "${_closure_array[@]}") \
+      || die "flox-env: no bin/bash found in Flox env closure"
+    unset _seed_array _closure_array _s _p
+  fi
+  unset _flox_seeds
+fi
+
+# -----------------------------------------------------------------------------
 # Build bwrap argument list
 # -----------------------------------------------------------------------------
+#
+# Shape:
+#   1. Hardening core (always — namespace setup, userns block,
+#      die-with-parent, hostname).  Same across run/agent/flox-env.
+#   2. Filesystem layout (mode-dependent).
+#      - run/agent:  host-overlaid (/usr, /bin, /sbin, /lib*, /nix all ro-bound;
+#                    /etc tmpfs + surgical allowlist; /proc, /dev, /tmp scratch).
+#      - flox-env:   Flox-closure-scoped (no host /usr/bin/lib exposure;
+#                    tmpfs /nix/store overlay + closure binds; synthetic /bin
+#                    and /usr/bin).  Built later after closure resolution.
+#   3. Network policy (shared logic, mode default differs).
+#   4. Env scrub + mode-specific setenvs.
+#   5. User extras.
+#   6. Lifecycle fds.
+#   7. /etc seal (--remount-ro /etc).
+#   8. Seccomp (TIOCSTI BPF).
 
+# 1. Hardening core — always.
 args=(
   # Namespaces.  Unshare everything except net (net is handled separately).
   --unshare-user
@@ -766,41 +1133,122 @@ args=(
   --die-with-parent
 
   --hostname "$hostname"
-
-  # Filesystem skeleton (read-only).
-  --ro-bind /usr /usr
-  --ro-bind /bin /bin
-  --ro-bind-try /sbin /sbin
-  --ro-bind-try /lib  /lib
-  --ro-bind-try /lib64 /lib64
-  --ro-bind-try /nix /nix
-
-  # /etc: tmpfs with a surgical allowlist bind-mounted on top.  After all
-  # binds are in place, --remount-ro makes the underlying tmpfs read-only too,
-  # so the agent cannot create arbitrary files under /etc (e.g. ld.so.preload
-  # to hijack later children).  The --ro-bind-try entries are independent
-  # mount points and remain readable regardless.
-  # Critically NOT bound: shadow, sudoers, ssh, pam.d, polkit, gshadow,
-  # cron.*, crontab, securetty, and anything else that could disclose host
-  # secrets or grant authority.
-  --tmpfs /etc
-  --ro-bind-try /etc/ld.so.cache    /etc/ld.so.cache
-  --ro-bind-try /etc/ld.so.conf     /etc/ld.so.conf
-  --ro-bind-try /etc/ld.so.conf.d   /etc/ld.so.conf.d
-  --ro-bind-try /etc/nsswitch.conf  /etc/nsswitch.conf
-  --ro-bind-try /etc/alternatives   /etc/alternatives
-  --ro-bind-try /etc/passwd         /etc/passwd
-  --ro-bind-try /etc/group          /etc/group
-  --ro-bind-try /etc/host.conf      /etc/host.conf
-  --ro-bind-try /etc/localtime      /etc/localtime
-
-  # Minimal /proc and /dev, scratch tmpfs mounts.
-  --proc /proc
-  --dev /dev
-  --tmpfs /tmp
-  --tmpfs /var/tmp
-  --tmpfs /run
 )
+
+# 2. Filesystem layout — mode-dependent.
+if [ "$cmd" = "run" ] || [ "$cmd" = "agent" ]; then
+  # run/agent: host-overlaid.  Expose host /usr, /bin, /sbin, /lib*, /nix
+  # read-only; /etc tmpfs with a surgical allowlist; /proc, /dev, /tmp scratch.
+  args+=(
+    # Filesystem skeleton (read-only).
+    --ro-bind /usr /usr
+    --ro-bind /bin /bin
+    --ro-bind-try /sbin /sbin
+    --ro-bind-try /lib  /lib
+    --ro-bind-try /lib64 /lib64
+    --ro-bind-try /nix /nix
+
+    # /etc: tmpfs with a surgical allowlist bind-mounted on top.  After all
+    # binds are in place, --remount-ro makes the underlying tmpfs read-only too,
+    # so the agent cannot create arbitrary files under /etc (e.g. ld.so.preload
+    # to hijack later children).  The --ro-bind-try entries are independent
+    # mount points and remain readable regardless.
+    # Critically NOT bound: shadow, sudoers, ssh, pam.d, polkit, gshadow,
+    # cron.*, crontab, securetty, and anything else that could disclose host
+    # secrets or grant authority.
+    --tmpfs /etc
+    --ro-bind-try /etc/ld.so.cache    /etc/ld.so.cache
+    --ro-bind-try /etc/ld.so.conf     /etc/ld.so.conf
+    --ro-bind-try /etc/ld.so.conf.d   /etc/ld.so.conf.d
+    --ro-bind-try /etc/nsswitch.conf  /etc/nsswitch.conf
+    --ro-bind-try /etc/alternatives   /etc/alternatives
+    --ro-bind-try /etc/passwd         /etc/passwd
+    --ro-bind-try /etc/group          /etc/group
+    --ro-bind-try /etc/host.conf      /etc/host.conf
+    --ro-bind-try /etc/localtime      /etc/localtime
+
+    # Minimal /proc and /dev, scratch tmpfs mounts.
+    --proc /proc
+    --dev /dev
+    --tmpfs /tmp
+    --tmpfs /var/tmp
+    --tmpfs /run
+  )
+elif [ "$cmd" = "flox-env" ]; then
+  # flox-env: Flox-closure-scoped.  No host /usr, /bin, /lib exposure.
+  # /etc still tmpfs + surgical allowlist (passwd/group/nsswitch/ld.so.*
+  # + /etc/nix for nix.conf).  /nix/store is either closure-scoped (default,
+  # immutable) or bound rw (--mutable).  Synthetic /bin and /usr/bin via
+  # tmpfs + symlink, pointing at bash in the closure and the flox binary.
+  args+=(
+    --tmpfs /etc
+    --ro-bind-try /etc/ld.so.cache    /etc/ld.so.cache
+    --ro-bind-try /etc/ld.so.conf     /etc/ld.so.conf
+    --ro-bind-try /etc/ld.so.conf.d   /etc/ld.so.conf.d
+    --ro-bind-try /etc/nsswitch.conf  /etc/nsswitch.conf
+    --ro-bind-try /etc/alternatives   /etc/alternatives
+    --ro-bind-try /etc/passwd         /etc/passwd
+    --ro-bind-try /etc/group          /etc/group
+    --ro-bind-try /etc/host.conf      /etc/host.conf
+    --ro-bind-try /etc/localtime      /etc/localtime
+    --ro-bind-try /etc/nix            /etc/nix
+
+    # Minimal /proc and /dev, scratch tmpfs mounts.
+    --proc /proc
+    --dev /dev
+    --tmpfs /tmp
+    --tmpfs /var/tmp
+    --tmpfs /run
+
+    # Ephemeral home — a tmpfs at the host's $HOME path.  Mode-specific
+    # bindings below will layer ~/.config/flox and ~/.local/share/flox
+    # into this tmpfs.
+    --tmpfs "$HOME"
+  )
+
+  # /nix/store visibility.
+  if [ "$mutable" = 1 ]; then
+    # Mutable: bind /nix/store and /nix/var rw so `flox install` can write
+    # via the nix daemon.  Source-build installs will still fail due to
+    # --disable-userns (nix-build's own sandbox needs userns), but the
+    # common case of cache-hit installs works.
+    args+=(
+      --bind /nix/store /nix/store
+      --bind /nix/var /nix/var
+    )
+  else
+    # Immutable: tmpfs overlay over /nix/store, then surface just the
+    # closure paths.  /nix/var is NOT bound (reduces info exposure); a
+    # read-only bind of /nix/var/nix/db is sufficient for nix-store
+    # --query to work for introspection inside the sandbox.
+    args+=(--tmpfs /nix/store)
+    if [ -d /nix/var/nix/db ]; then
+      args+=(--ro-bind /nix/var/nix/db /nix/var/nix/db)
+    fi
+    # Surface each closure path.  bwrap creates mount-point parents
+    # automatically, and since we just laid a tmpfs over /nix/store, each
+    # --ro-bind here creates a fresh directory entry in the tmpfs pointing
+    # at the host's real store path.
+    while IFS= read -r _p; do
+      [ -n "$_p" ] && args+=(--ro-bind "$_p" "$_p")
+    done <<<"$flox_env_closure"
+    unset _p
+  fi
+
+  # Synthetic /bin with sh/bash symlinking into the closure.
+  args+=(
+    --tmpfs /bin
+    --symlink "$flox_env_bash" /bin/sh
+    --symlink "$flox_env_bash" /bin/bash
+  )
+
+  # Synthetic /usr/bin with flox symlink.  Note: we tmpfs /usr/bin, NOT
+  # /usr — nothing from host /usr/lib or /usr/share leaks in.
+  args+=(
+    --tmpfs /usr/bin
+    --symlink "$flox_env_flox_bin" /usr/bin/flox
+  )
+fi
 
 # Network policy.
 if [ "$net" = "1" ]; then
@@ -879,6 +1327,87 @@ if [ "$cmd" = "agent" ]; then
   # on an older kernel, or on a host that has flipped dev.tty.legacy_tiocsti
   # to true for compatibility reasons, TIOCSTI is unfiltered — so don't
   # disable seccomp unless you've verified your kernel's TIOCSTI policy.
+elif [ "$cmd" = "flox-env" ]; then
+  # flox-env mode: ephemeral HOME tmpfs (laid by the fs block above),
+  # Flox config mounts, interactive tty preserved (no --new-session —
+  # TIOCSTI seccomp handles the injection class instead), no host PATH
+  # inheritance (PATH is whatever the baseline env block set, typically
+  # /usr/bin:/bin after the override below).
+  args+=(
+    --setenv HOME "$HOME"
+    --setenv TMPDIR "/tmp"
+    --setenv PATH "/usr/bin:/bin"
+    --setenv USER "${USER:-user}"
+    --setenv SHELL "/bin/bash"
+    --setenv FLOX_SHELL "bash"
+    --chdir "$HOME"
+  )
+
+  # Flox config bindings.  ~/.config/flox bound ro because it contains auth
+  # tokens for remote catalogs — a compromised in-sandbox process could
+  # read them, which we accept as the cost of making `flox` commands work
+  # inside the sandbox.  ~/.local/share/flox bound rw because flox writes
+  # registry lock files there.
+  if [ -d "$HOME/.config/flox" ]; then
+    args+=(--ro-bind "$HOME/.config/flox" "$HOME/.config/flox")
+  fi
+  if [ -d "$HOME/.local/share/flox" ]; then
+    args+=(--bind "$HOME/.local/share/flox" "$HOME/.local/share/flox")
+  fi
+
+  # Env reference: local envs get their .flox bound to /.flox (so we can
+  # activate -d /); remote envs get ~/.cache/flox bound so the pulled
+  # env is reachable from inside.
+  if [ -n "$local_env" ]; then
+    args+=(--bind "$flox_env_project_local/.flox" "/.flox")
+  else
+    if [ -d "$HOME/.cache/flox" ]; then
+      args+=(--bind "$HOME/.cache/flox" "$HOME/.cache/flox")
+    fi
+  fi
+
+  # Passthrough env vars (same semantics as agent mode).
+  for _pte in "${passthrough_envs[@]}"; do
+    [ -z "$_pte" ] && continue
+    _pte_val=${!_pte:-}
+    if [ -n "$_pte_val" ]; then
+      args+=(--setenv "$_pte" "$_pte_val")
+    fi
+  done
+  unset _pte _pte_val
+
+  # Optional resource passthroughs.  Each is guarded on host presence so
+  # they're no-ops if the host lacks the relevant bits.
+  if [ "$x11" = 1 ] && [ -n "${DISPLAY:-}" ]; then
+    # Extract display number: ":0" → "0", ":0.1" → "0".
+    _xnum=${DISPLAY#*:}
+    _xnum=${_xnum%%.*}
+    args+=(--setenv DISPLAY "$DISPLAY")
+    if [ -S "/tmp/.X11-unix/X$_xnum" ]; then
+      args+=(--ro-bind "/tmp/.X11-unix/X$_xnum" "/tmp/.X11-unix/X$_xnum")
+    fi
+    if [ -f "$HOME/.Xauthority" ]; then
+      args+=(--ro-bind "$HOME/.Xauthority" "$HOME/.Xauthority")
+    fi
+    unset _xnum
+  fi
+  if [ "$gpu" = 1 ]; then
+    [ -d /dev/dri ] && args+=(--dev-bind /dev/dri /dev/dri)
+    [ -d /sys/dev/char ] && args+=(--ro-bind /sys/dev/char /sys/dev/char)
+    [ -d /sys/devices/pci0000:00 ] && args+=(--ro-bind /sys/devices/pci0000:00 /sys/devices/pci0000:00)
+    [ -d /run/opengl-driver ] && args+=(--ro-bind /run/opengl-driver /run/opengl-driver)
+  fi
+  if [ "$dev_shm" = 1 ] && [ -d /dev/shm ]; then
+    args+=(--dev-bind /dev/shm /dev/shm)
+  fi
+
+  # Mutable mode warning (printed to stderr just before exec in non-dry-run
+  # mode; dry-run mode still prints it so users see the warning when
+  # reviewing the sandbox policy).
+  if [ "$mutable" = 1 ]; then
+    printf '%s: mutable mode: /nix/store and /nix/var are bound read-write; sandbox can mutate the host nix database\n' \
+      "$prog" >&2
+  fi
 else
   # run mode: neutral HOME, scratch cwd, new session (no interactive tty needs).
   args+=(
@@ -1020,18 +1549,20 @@ if [ "$seccomp_enabled" = "1" ]; then
       # on a failed command substitution (which would otherwise kill
       # the script silently before we reach the die message), while
       # still capturing the command's stderr into $x.
-      if ! _seccomp_probe_err=$(
-        bwrap --ro-bind / / --disable-userns --assert-userns-disabled \
-              --unshare-user --unshare-pid --die-with-parent \
-              --seccomp 11 11<"$BPF_PATH" \
-              true 2>&1 >/dev/null
-      ); then
-        die "seccomp BPF rejected by bwrap: $BPF_PATH (${_seccomp_probe_err:-no stderr from bwrap})"
+      if [ "$dry_run" != 1 ]; then
+        if ! _seccomp_probe_err=$(
+          bwrap --ro-bind / / --disable-userns --assert-userns-disabled \
+                --unshare-user --unshare-pid --die-with-parent \
+                --seccomp 11 11<"$BPF_PATH" \
+                true 2>&1 >/dev/null
+        ); then
+          die "seccomp BPF rejected by bwrap: $BPF_PATH (${_seccomp_probe_err:-no stderr from bwrap})"
+        fi
+        unset _seccomp_probe_err
+        # Open on fd 10 and pass to bwrap.  bwrap inherits non-cloexec fds,
+        # and bash's `exec N<file` form does not set cloexec by default.
+        exec 10<"$BPF_PATH"
       fi
-      unset _seccomp_probe_err
-      # Open on fd 10 and pass to bwrap.  bwrap inherits non-cloexec fds,
-      # and bash's `exec N<file` form does not set cloexec by default.
-      exec 10<"$BPF_PATH"
       args+=(--seccomp 10)
       ;;
     *)
@@ -1041,4 +1572,34 @@ if [ "$seccomp_enabled" = "1" ]; then
   esac
 fi
 
-exec bwrap "${args[@]}" -- "$@"
+# Compose the final command line inside the sandbox.  For flox-env mode
+# (unless --no-activate) we wrap the user command in `flox activate` so the
+# sandboxed process runs inside the activated env's shell environment.
+if [ "$cmd" = "flox-env" ] && [ "$no_activate" = 0 ]; then
+  if [ -n "$local_env" ]; then
+    final_cmd=(flox activate -d / -- "$@")
+  else
+    final_cmd=(flox activate -r "$remote_env" -- "$@")
+  fi
+else
+  final_cmd=("$@")
+fi
+
+# Dry-run: print the bwrap argv to stdout and exit without execing.  Uses
+# %q quoting so the output is re-runnable as a shell command.  Skipped in
+# non-flox-env modes because --dry-run is rejected there by the validation
+# block above.
+if [ "$dry_run" = 1 ]; then
+  printf 'bwrap'
+  for _arg in "${args[@]}"; do
+    printf ' %q' "$_arg"
+  done
+  printf ' --'
+  for _arg in "${final_cmd[@]}"; do
+    printf ' %q' "$_arg"
+  done
+  printf '\n'
+  exit 0
+fi
+
+exec bwrap "${args[@]}" -- "${final_cmd[@]}"

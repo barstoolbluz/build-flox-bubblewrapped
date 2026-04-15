@@ -31,6 +31,13 @@ Full threat model and design rationale: see the comment block at the top of
   rw, persistent agent home, host `$PATH` inherited, `~/.gitconfig` ro-bound,
   opt-in env-var passthrough (default `ANTHROPIC_API_KEY`), interactive
   controlling tty preserved. Net on by default.
+- **`bubblewrap-jail flox-env [opts] -- CMD`** — Jail a Flox environment as a
+  hardened container. The sandbox sees only the Flox env's closure
+  (default, immutable) or the full `/nix/store` rw (`--mutable`, for
+  `flox install`). Supports local envs via `-d DIR` and remote catalog envs
+  via `-r OWNER/NAME`. Requires `nix-store` and `flox` on `$PATH` at
+  invocation time. Net off by default; `--x11`, `--gpu`, `--dev-shm`, and
+  `--dry-run` are available as opt-ins.
 - **`bubblewrap-jail check`** — Probe the host for required bwrap/kernel
   features. Reports PASS/FAIL per check; exits 0 if all green.
 
@@ -54,6 +61,66 @@ Run `bubblewrap-jail --help` for the full option list.
 
 User-supplied `--bind` / `--ro-bind` flags are applied **after** the default
 policy and can re-expose anything; the defaults are policy, not a guarantee.
+
+## Flox environment sandboxing (v0.6.0+)
+
+The `flox-env` subcommand runs a Flox environment as a hardened,
+container-like sandbox. All the hardening above (TIOCSTI seccomp,
+`--disable-userns`, `--die-with-parent`, `/etc` seal) applies; the
+differences are in the filesystem layout.
+
+**Immutable mode** (default) — closure-scoped, airtight:
+
+```bash
+# Run a shell inside a local Flox env's closure
+bubblewrap-jail flox-env -d ./my-project -- bash
+
+# Run a specific command inside a remote Flox catalog env
+bubblewrap-jail flox-env -r myorg/data-pipeline -- python main.py
+
+# Inspect the sandbox policy without running anything
+bubblewrap-jail flox-env -d ./my-project --dry-run -- some-command
+```
+
+In immutable mode the sandbox sees only the transitive closure of (the
+flox binary + the env's run-symlink targets). Host `/usr`, `/bin`,
+`/lib*`, and the bulk of `/nix/store` are **not** visible. `/bin/sh`,
+`/bin/bash`, and `/usr/bin/flox` are synthesized via tmpfs + symlink to
+the corresponding paths in the closure.
+
+**Mutable mode** (`--mutable`) — for `flox install` inside the sandbox:
+
+```bash
+# Let the sandboxed agent install packages into its own env
+bubblewrap-jail flox-env --mutable --net -d ./my-project -- flox install ripgrep
+```
+
+Mutable mode binds the **full** host `/nix/store` and `/nix/var`
+read-write so the nix daemon socket is reachable and the sandbox can
+write to the store via the daemon. This is a deliberate security
+trade-off: the sandboxed process can read every store path on the host
+and mutate the host nix database. **Only use `--mutable` with trusted
+agents.** Source-build installs (non-cache-hit) will still fail because
+`nix-build` uses its own userns-based sandbox, which cannot nest under
+bubblewrap-jail's `--disable-userns`; cache-hit installs (the common
+case) work fine.
+
+**Runtime dependencies:** `flox-env` needs `nix-store` and `flox` on
+`$PATH` at wrapper-invocation time (not inside the sandbox — closure
+computation happens before the bwrap exec). The `check` subcommand
+reports these as OPT probes so `bubblewrap-jail check` tells you whether
+`flox-env` will work on your host.
+
+**Optional resource passthroughs** (off by default, only valid in
+`flox-env` mode):
+
+- `--x11` — bind the X socket + `~/.Xauthority` for GUI workloads
+- `--gpu` — bind `/dev/dri`, `/sys/dev/char`, `/sys/devices/pci0000:00`,
+  `/run/opengl-driver` for CUDA/ML workloads
+- `--dev-shm` — bind `/dev/shm` for databases and SHM-based IPC
+
+These are port-for-port equivalents of `flox-bwrap`'s corresponding flags
+(see `ACKNOWLEDGMENTS.md`).
 
 ## Layout
 
@@ -129,7 +196,7 @@ bash test/red-team.sh                          # against the built artifact
 bash test/red-team.sh ./src/bubblewrap-jail    # against source (seccomp skipped)
 ```
 
-140 assertions covering filesystem isolation, network policy, privilege
+157 assertions covering filesystem isolation, network policy, privilege
 escape, environment allowlist, project-dir precedence, bind API contract,
 `--passthrough-env` and reserved-name rejection, `--project-as` validation,
 TIOCSTI seccomp blocking, interactive controlling-tty behavior, `--help`
