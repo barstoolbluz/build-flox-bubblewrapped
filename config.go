@@ -194,12 +194,14 @@ func parseConfig(mode string, args []string) (*Config, error) {
 			if i+1 >= len(args) {
 				return nil, fmt.Errorf("--lock-file needs PATH")
 			}
-			// Pre-validate existence — bwrap will fail with a cryptic
+			// Pre-validate accessibility — bwrap will fail with a cryptic
 			// "Can't find source path" if the file is missing or
 			// inaccessible.  Check err != nil (not just IsNotExist) so
 			// we also catch permission-denied and other stat failures.
+			// NOTE: the "does not exist" wording is load-bearing for the
+			// red-team test suite (test/red-team.sh anchors on it).
 			if _, err := os.Stat(args[i+1]); err != nil {
-				return nil, fmt.Errorf("--lock-file path does not exist: %s (create it first; bwrap will not)", args[i+1])
+				return nil, fmt.Errorf("--lock-file path does not exist or is inaccessible: %s (%v)", args[i+1], err)
 			}
 			cfg.LockFile = args[i+1]
 			i += 2

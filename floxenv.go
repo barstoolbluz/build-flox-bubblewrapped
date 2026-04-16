@@ -21,18 +21,13 @@ type floxEnvState struct {
 // mutable mode, which skips closure enumeration), and finds bash in the
 // closure for the /bin/sh and /bin/bash symlinks.
 func resolveFloxEnv(cfg *Config) (*floxEnvState, error) {
-	// Verify runtime deps.
-	if _, err := exec.LookPath("flox"); err != nil {
+	// Resolve the flox binary's store path (also validates it's on PATH).
+	floxPath, err := exec.LookPath("flox")
+	if err != nil {
 		return nil, fmt.Errorf("flox-env: flox CLI not on PATH")
 	}
 	if _, err := exec.LookPath("nix-store"); err != nil && !cfg.Mutable {
 		return nil, fmt.Errorf("flox-env: nix-store not on PATH (required for closure computation)")
-	}
-
-	// Resolve the flox binary's store path.
-	floxPath, err := exec.LookPath("flox")
-	if err != nil {
-		return nil, fmt.Errorf("flox-env: flox not found: %w", err)
 	}
 	floxResolved, err := filepath.EvalSymlinks(floxPath)
 	if err != nil {
