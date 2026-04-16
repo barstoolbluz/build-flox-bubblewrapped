@@ -2,6 +2,11 @@
 /result-*
 *.prevOutPath
 
+# Build-time generated seccomp BPF blob (arch-specific, produced by
+# gen-seccomp.c at build time and embedded into the Go binary via
+# //go:embed).  Not checked in; the nix preBuild step generates it.
+/tiocsti.bpf
+
 # Local workspace notes (Claude operational notes, volatile handoff state).
 # These live in the working tree but are not part of the project source.
 /CLAUDE.md

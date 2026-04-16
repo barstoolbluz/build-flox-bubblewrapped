@@ -1,23 +1,30 @@
 schema-version = "1.11.0"
 
-# Dev-shell packages only.  The BUILD of bubblewrap-jail is defined as a
-# nix expression at .flox/pkgs/bubblewrap-jail.nix — its build inputs
-# (pkg-config, libseccomp, shellcheck) come from the expression's function
-# arguments, not from this [install] block.
+# Dev-shell tools for iterating on Go source + running the red-team test
+# suite.  The BUILD of bubblewrap-jail is defined as a nix expression at
+# .flox/pkgs/bubblewrap-jail.nix (buildGoModule) — its build inputs come
+# from the expression's function arguments, not from this [install] block.
 #
 # What's here exists so that `flox activate` gives an ergonomic interactive
 # dev shell for:
-#   - running the red-team test harness against either the built artifact
-#     or the source tree (both bubblewrap and perl are used by tests)
-#   - local shellcheck-before-build iteration on src/bubblewrap-jail
-#   - validating `check --json` output structurally via jq
+#   - `go build` / `go vet` iteration on the Go source
+#   - compiling gen-seccomp.c locally to produce tiocsti.bpf for //go:embed
+#   - running the red-team test harness (needs bwrap, perl, jq)
+#   - local shellcheck on test/red-team.sh
 [install]
+go.pkg-path              = "go"
 bashInteractive.pkg-path = "bashInteractive"
 shellcheck.pkg-path      = "shellcheck"
 jq.pkg-path              = "jq"
 perl.pkg-path            = "perl"
 bubblewrap.pkg-path      = "bubblewrap"
 bubblewrap.systems       = ["x86_64-linux", "aarch64-linux"]
+# gen-seccomp.c build deps (for local dev; nix expression provides them
+# at build time via nativeBuildInputs/buildInputs):
+libseccomp.pkg-path      = "libseccomp"
+libseccomp.outputs       = ["out", "lib", "dev"]
+pkg-config.pkg-path      = "pkg-config"
+gcc.pkg-path             = "gcc"
 
 [options]
 systems = ["x86_64-linux", "aarch64-linux"]

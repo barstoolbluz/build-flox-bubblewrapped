@@ -504,8 +504,11 @@ expect_fail \
 
 # O1: --die-with-parent must stay wired into the wrapper's bwrap argv.
 # This is a static guard; the actual kernel behavior is bwrap's, we just
-# need to keep passing the flag.  Looks at the wrapped script behind the
-# Flox shim if present.
+# need to keep passing the flag.
+#
+# For a bash script (pre-v0.9.0): grep the script source directly.
+# For a compiled Go binary (v0.9.0+): grep the binary — Go embeds
+# string literals in .rodata, so "--die-with-parent" is greppable.
 WRAPPED_SCRIPT="$(dirname "$JAIL")/.bubblewrap-jail-wrapped"
 if [ -f "$WRAPPED_SCRIPT" ]; then
   CHECK_SCRIPT="$WRAPPED_SCRIPT"
@@ -518,12 +521,30 @@ expect_pass \
 
 # O2: missing /nix should not break the wrapper.  The wrapper uses
 # --ro-bind-try (not --ro-bind) for /nix, which silently no-ops on
-# hosts where /nix is absent.  We can't easily simulate "missing /nix"
-# from a Nix host, so this is a static guard against accidentally
-# changing --ro-bind-try /nix to --ro-bind /nix.
-expect_pass \
-  "wrapper uses --ro-bind-try /nix (graceful when /nix absent)" -- \
-  grep -q -- "--ro-bind-try /nix" "$CHECK_SCRIPT"
+# hosts where /nix is absent.
+#
+# For a bash script: grep for the literal "--ro-bind-try /nix" string
+# (both tokens on one line).  For a compiled Go binary: the two tokens
+# are separate string literals and won't appear contiguous, so we grep
+# the Go source file instead (run.go contains `roBindTry("/nix")`).
+# If neither is available, we skip — the CI build always has the source.
+if file "$JAIL" 2>/dev/null | grep -q "ELF"; then
+  # Go binary: grep the source file for the roBindTry("/nix") pattern.
+  _srcdir="$(dirname "$(dirname "$JAIL")")"
+  _gosrc="$FLOX_ENV_PROJECT/run.go"
+  if [ -f "$_gosrc" ]; then
+    expect_pass \
+      "wrapper uses --ro-bind-try /nix (graceful when /nix absent)" -- \
+      grep -q 'roBindTry.*/nix' "$_gosrc"
+  else
+    echo "  skip: run.go not found for Go-binary static guard"
+  fi
+  unset _srcdir _gosrc
+else
+  expect_pass \
+    "wrapper uses --ro-bind-try /nix (graceful when /nix absent)" -- \
+    grep -q -- "--ro-bind-try /nix" "$CHECK_SCRIPT"
+fi
 
 echo
 echo "[B2: human-readable PFC dump shipped alongside BPF blob]"
@@ -833,18 +854,29 @@ expect_stdout_matches \
 
 echo
 echo "[--help works without bwrap in PATH]"
-# Invoke bash explicitly to bypass the #!/usr/bin/env bash shebang: we want to
-# isolate PATH to test the 'command -v bwrap' check, not test env(1)'s lookup.
-BASH_BIN=$(command -v bash)
-expect_pass \
-  "run: --help succeeds with empty PATH" -- \
-  env -i PATH=/nonexistent "$BASH_BIN" "$JAIL" --help
-
-# With bwrap absent, bad subcommand should error cleanly (not crash because of
-# an early dependency check).  Non-zero exit = cleanly rejected subcommand.
-expect_fail \
-  "run: bad subcommand errors cleanly with empty PATH" -- \
-  env -i PATH=/nonexistent "$BASH_BIN" "$JAIL" bogus
+# Test that --help and error reporting work even when bwrap isn't on PATH.
+# For a bash script (pre-v0.9.0): invoke bash explicitly to bypass the
+# #!/usr/bin/env bash shebang.
+# For a compiled Go binary (v0.9.0+): invoke the binary directly — it's
+# statically linked and doesn't need PATH to find itself.
+if file "$JAIL" 2>/dev/null | grep -q "ELF"; then
+  # Go binary: invoke directly with empty PATH.
+  expect_pass \
+    "run: --help succeeds with empty PATH" -- \
+    env -i PATH=/nonexistent "$JAIL" --help
+  expect_fail \
+    "run: bad subcommand errors cleanly with empty PATH" -- \
+    env -i PATH=/nonexistent "$JAIL" bogus
+else
+  # Bash script: invoke via explicit bash to bypass shebang.
+  BASH_BIN=$(command -v bash)
+  expect_pass \
+    "run: --help succeeds with empty PATH" -- \
+    env -i PATH=/nonexistent "$BASH_BIN" "$JAIL" --help
+  expect_fail \
+    "run: bad subcommand errors cleanly with empty PATH" -- \
+    env -i PATH=/nonexistent "$BASH_BIN" "$JAIL" bogus
+fi
 
 echo
 echo "[check subcommand]"

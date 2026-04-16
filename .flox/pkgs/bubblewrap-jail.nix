@@ -1,114 +1,104 @@
 { lib
-, stdenv
+, buildGoModule
+, bubblewrap
 , pkg-config
 , libseccomp
 , shellcheck
 }:
 
-# bubblewrap-jail — opinionated bwrap wrapper packaged as a Flox nix-expression
-# build.  See src/bubblewrap-jail for the wrapper itself, src/gen-seccomp.c for
-# the TIOCSTI seccomp helper, CLAUDE.md for the project conventions, and
-# ROADMAP.md for the feature history.
+# bubblewrap-jail — opinionated bwrap wrapper rewritten in Go (v0.9.0).
 #
-# This derivation deliberately does NOT reference bubblewrap.  The installed
-# script calls `bwrap` via $PATH at runtime; consumers install both this
-# package and the separate `bubblewrap` package in their Flox env (see the
-# consumer env at /home/daedalus/dev/floxwrapped).  Keeping bwrap out of this
-# closure lets consumers pick the bwrap version they want to run against.
+# Build: `flox build bubblewrap-jail`
 #
-# This derivation replaces the previous [build.bubblewrap-jail] block in
-# .flox/env/manifest.toml (manifest-build style).  See commit v0.5.0 for the
-# migration rationale.
+# The Go binary embeds the seccomp BPF blob at compile time via //go:embed.
+# gen-seccomp.c (in src/) is compiled and run in preBuild to produce the
+# blob before `go build` starts.  The blob and its human-readable PFC dump
+# are also installed to $out/share/bubblewrap-jail/ for audit.
+#
+# bwrap path and version are baked in via -ldflags so the binary is fully
+# self-contained at runtime (no @BPF_PATH@ or @VERSION@ substitution).
 
-stdenv.mkDerivation (finalAttrs: {
+buildGoModule {
   pname = "bubblewrap-jail";
-  version = "0.6.0";
+  version = "0.9.0";
 
-  # Project root.  Flox's nix-expression builds run inside the Nix sandbox,
-  # which means only git-tracked files are visible — same constraint the
-  # manifest build had under `sandbox = "pure"`.  Any new source file must be
-  # `git add`ed before `flox build` will see it.
-  src = ../..;
+  src = lib.fileset.toSource {
+    root = ../..;
+    fileset = lib.fileset.unions [
+      ../../go.mod
+      ../../go.sum
+      ../../main.go
+      ../../config.go
+      ../../sandbox.go
+      ../../run.go
+      ../../agent.go
+      ../../floxenv.go
+      ../../check.go
+      ../../paths.go
+      ../../seccomp.go
+      ../../src/gen-seccomp.c
+    ];
+  };
 
-  nativeBuildInputs = [ pkg-config shellcheck ];
-  buildInputs       = [ libseccomp ];
+  vendorHash = "sha256-LXR8/S1x5FOxgcp8uXppc2foxwHZq6KANA3WCtX0MoE=";
 
-  # Default unpack/patch phases are fine: stdenv copies src → build dir.
+  nativeBuildInputs = [ pkg-config ];
+  buildInputs = [ libseccomp ];
 
-  buildPhase = ''
-    runHook preBuild
+  # The go-modules (vendor) derivation inherits preBuild, but doesn't have
+  # libseccomp.  Clear preBuild there so only the main build compiles
+  # gen-seccomp.
+  overrideModAttrs = _: {
+    preBuild = "";
+    postInstall = "";
+  };
 
-    # Phase 1 — shellcheck lint pass (style severity, same as the previous
-    # manifest build).  Catches nit-level issues before the build continues.
-    shellcheck --severity=style --shell=bash src/bubblewrap-jail
+  ldflags = [
+    "-X main.bwrapPath=${bubblewrap}/bin/bwrap"
+    "-X main.version=0.9.0"
+  ];
 
-    # Phase 2 — compile gen-seccomp against libseccomp.
-    # -Wno-missing-field-initializers silences a benign warning from
-    # libseccomp's SCMP_A1 macro, which intentionally leaves the range-high
-    # field zeroed.
+  # Generate the BPF blob + PFC dump BEFORE `go build` runs.
+  # go build picks up tiocsti.bpf via //go:embed in seccomp.go.
+  preBuild = ''
+    cd "$NIX_BUILD_TOP/source"
     $CC -O2 -Wall -Wextra -Wno-missing-field-initializers \
         -o gen-seccomp src/gen-seccomp.c \
         $(pkg-config --cflags --libs libseccomp)
-
-    # Phase 3 — generate the raw BPF blob that blocks ioctl(_, TIOCSTI, _).
-    # Refuse implausibly small or large blobs (guards against a gen-seccomp
-    # regression that silently emits garbage).
     ./gen-seccomp > tiocsti.bpf
+    ./gen-seccomp --pfc > tiocsti.pfc
     bpf_bytes=$(wc -c < tiocsti.bpf)
     if [ "$bpf_bytes" -lt 32 ] || [ "$bpf_bytes" -gt 4096 ]; then
       echo "gen-seccomp: unexpected BPF size $bpf_bytes" >&2
       exit 1
     fi
-
-    # Phase 4 — generate the human-readable PFC dump alongside the BPF.
-    # Purely an audit artifact: the wrapper doesn't read it at runtime, but
-    # it lets an auditor `cat` it directly to see the filter rules without
-    # needing libseccomp tooling on the inspecting host.  (Roadmap item B2.)
-    ./gen-seccomp --pfc > tiocsti.pfc
     if [ ! -s tiocsti.pfc ]; then
       echo "gen-seccomp --pfc produced empty output" >&2
       exit 1
     fi
-
-    # Phase 5 — A9 regression guard: gen-seccomp must reject extra arguments.
-    # A bug that silently ignored them would let typos like `gen-seccomp --pfc
-    # out.pfc` pass without the user noticing.
+    # A9 regression guard: gen-seccomp must reject extra arguments.
     if ./gen-seccomp --pfc extra-arg >/dev/null 2>&1; then
       echo "gen-seccomp accepts extra arguments (A9 regression)" >&2
       exit 1
     fi
-
-    runHook postBuild
+    cd -
   '';
 
-  installPhase = ''
-    runHook preInstall
-
-    install -Dm644 tiocsti.bpf          $out/share/bubblewrap-jail/tiocsti.bpf
-    install -Dm644 tiocsti.pfc          $out/share/bubblewrap-jail/tiocsti.pfc
-    install -Dm755 src/bubblewrap-jail  $out/bin/bubblewrap-jail
-
-    # Substitute the build-time placeholders in the installed script.
-    # `substituteInPlace --replace-fail` errors loudly if a placeholder is
-    # missing — stronger than the previous `sed -i` which silently no-op'd
-    # on a placeholder-free script.  CRITICAL: each placeholder MUST appear
-    # exactly once in src/bubblewrap-jail.  In particular, do NOT put
-    # @BPF_PATH@ or @VERSION@ inside any comment in the script — the
-    # substitution is global and would rewrite the comment too, breaking
-    # either the seccomp detection or the version reporting.  This is the
-    # same class of bug as C2 in v0.3.6.
-    substituteInPlace $out/bin/bubblewrap-jail \
-      --replace-fail '@BPF_PATH@' "$out/share/bubblewrap-jail/tiocsti.bpf" \
-      --replace-fail '@VERSION@'  "${finalAttrs.version}"
-
-    runHook postInstall
+  postInstall = ''
+    # Rename the binary from the Go module name to the project name.
+    mv $out/bin/build-flox-bubblewrapped $out/bin/bubblewrap-jail
+    # Ship the BPF + PFC for audit (the binary embeds the BPF via
+    # //go:embed, so these are purely for human inspection).
+    cd "$NIX_BUILD_TOP/source"
+    install -Dm644 tiocsti.bpf $out/share/bubblewrap-jail/tiocsti.bpf
+    install -Dm644 tiocsti.pfc $out/share/bubblewrap-jail/tiocsti.pfc
+    cd -
   '';
 
   meta = {
-    description = "Opinionated bubblewrap wrapper: run/agent subcommands, secure-by-default defaults";
-    homepage    = "https://github.com/barstoolbluz/build-flox-bubblewrapped";
-    # license: repo has no LICENSE file today; omitted until one lands.
-    platforms   = [ "x86_64-linux" "aarch64-linux" ];
+    description = "Opinionated bubblewrap wrapper: run/agent/flox-env subcommands, secure-by-default defaults";
+    homepage = "https://github.com/barstoolbluz/build-flox-bubblewrapped";
+    platforms = [ "x86_64-linux" "aarch64-linux" ];
     mainProgram = "bubblewrap-jail";
   };
-})
+}
