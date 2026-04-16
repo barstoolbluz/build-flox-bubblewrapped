@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"syscall"
 )
@@ -175,12 +174,14 @@ func printDryRun(bwrap string, args []string, cmd []string) {
 
 // --- helpers ---
 
-// roBindTry returns --ro-bind-try SRC SRC if SRC exists, else nil.
+// roBindTry returns --ro-bind-try SRC SRC unconditionally.  bwrap silently
+// ignores the bind if the source path doesn't exist at mount time — that's
+// the entire point of -try vs plain --ro-bind.  We do NOT pre-check with
+// os.Stat because that introduces a TOCTOU race: the file could appear
+// between our check and bwrap's mount (e.g., NetworkManager writing
+// /etc/resolv.conf), and the bash version never pre-checked.
 func roBindTry(path string) []string {
-	if _, err := os.Stat(path); err == nil {
-		return []string{"--ro-bind-try", path, path}
-	}
-	return nil
+	return []string{"--ro-bind-try", path, path}
 }
 
 // etcAllowlistBase returns the /etc tmpfs + surgical allowlist shared by
@@ -235,16 +236,3 @@ func userBoundDst(cfg *Config, dst string) bool {
 	return false
 }
 
-// resolveRealpath resolves a path to its canonical absolute form,
-// following symlinks.  Equivalent to `readlink -f` in bash.
-func resolveRealpath(p string) string {
-	abs, err := filepath.Abs(p)
-	if err != nil {
-		return p
-	}
-	resolved, err := filepath.EvalSymlinks(abs)
-	if err != nil {
-		return abs
-	}
-	return resolved
-}

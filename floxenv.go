@@ -54,7 +54,12 @@ func resolveFloxEnv(cfg *Config) (*floxEnvState, error) {
 		if err != nil || !info.IsDir() {
 			return nil, fmt.Errorf("flox-env: local env not a directory: %s", cfg.LocalEnv)
 		}
-		fes.localAbsDir = absDir
+		// Resolve symlinks — matches bash's `cd "$dir" && pwd -P`.
+		resolved, err := filepath.EvalSymlinks(absDir)
+		if err != nil {
+			resolved = absDir // fallback to unresolved
+		}
+		fes.localAbsDir = resolved
 		envTargets, err = resolveLocalEnvTargets(absDir)
 		if err != nil {
 			return nil, fmt.Errorf("flox-env: %w", err)

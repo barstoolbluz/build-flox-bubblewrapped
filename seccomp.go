@@ -76,44 +76,11 @@ func loadSeccompFd(bwrapPath string, dryRun bool) ([]string, error) {
 // preflightSeccomp runs a throwaway bwrap with the BPF loaded to verify
 // the kernel accepts it.  This catches truncated blobs, kernel ABI
 // mismatches, and libseccomp version skew before the real exec.
+//
+// Uses a pipe to pass the BPF to bwrap on fd 11 (not 10, to avoid
+// conflict with fds the parent may have open).  ExtraFiles[N] maps to
+// fd 3+N in the child, so ExtraFiles[8] = fd 11.
 func preflightSeccomp(bwrapPath string) error {
-	// Write the blob to a temp file for the probe.
-	f, err := os.CreateTemp("", "seccomp-probe-*.bpf")
-	if err != nil {
-		return fmt.Errorf("seccomp preflight: create temp: %w", err)
-	}
-	defer os.Remove(f.Name())
-	defer f.Close()
-
-	if _, err := f.Write(tiocstiBPF); err != nil {
-		return fmt.Errorf("seccomp preflight: write temp: %w", err)
-	}
-
-	// Run: bwrap --ro-bind / / --disable-userns --assert-userns-disabled
-	//      --unshare-user --unshare-pid --die-with-parent
-	//      --seccomp 11 11<tempfile true
-	//
-	// We use fd 11 for the probe (not 10) so it doesn't conflict with
-	// any fd the parent may have open on 10.
-	cmd := exec.Command(bwrapPath,
-		"--ro-bind", "/", "/",
-		"--disable-userns", "--assert-userns-disabled",
-		"--unshare-user", "--unshare-pid", "--die-with-parent",
-		"--seccomp", "11",
-		"true",
-	)
-	// Open the BPF file on fd 11 for the child process.
-	bpfFile, err := os.Open(f.Name())
-	if err != nil {
-		return fmt.Errorf("seccomp preflight: reopen temp: %w", err)
-	}
-	defer bpfFile.Close()
-	cmd.ExtraFiles = []*os.File{nil, nil, nil, nil, nil, nil, nil, nil, bpfFile}
-	// ExtraFiles[8] maps to fd 3+8=11 in the child... actually that's wrong.
-	// ExtraFiles[N] maps to fd 3+N.  So ExtraFiles[8] = fd 11.  We need
-	// exactly 8 nil entries then the real file at index 8.
-
-	// Actually let me use a simpler approach: use a pipe.
 	pr, pw, err := os.Pipe()
 	if err != nil {
 		return fmt.Errorf("seccomp preflight: pipe: %w", err)
@@ -126,19 +93,19 @@ func preflightSeccomp(bwrapPath string) error {
 	}
 	pw.Close()
 
-	// Build the ExtraFiles slice so the pipe read end lands on fd 11.
-	// ExtraFiles[0] → fd 3, [1] → fd 4, ..., [8] → fd 11.
+	// ExtraFiles[0] → fd 3, ..., [8] → fd 11.
 	extras := make([]*os.File, 9)
 	extras[8] = pr
-	cmd2 := exec.Command(bwrapPath,
+
+	cmd := exec.Command(bwrapPath,
 		"--ro-bind", "/", "/",
 		"--disable-userns", "--assert-userns-disabled",
 		"--unshare-user", "--unshare-pid", "--die-with-parent",
 		"--seccomp", "11",
 		"true",
 	)
-	cmd2.ExtraFiles = extras
-	out, err := cmd2.CombinedOutput()
+	cmd.ExtraFiles = extras
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		detail := string(out)
 		if detail == "" {

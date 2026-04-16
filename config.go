@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -194,8 +195,10 @@ func parseConfig(mode string, args []string) (*Config, error) {
 				return nil, fmt.Errorf("--lock-file needs PATH")
 			}
 			// Pre-validate existence — bwrap will fail with a cryptic
-			// "Can't find source path" if the file is missing.
-			if _, err := os.Stat(args[i+1]); os.IsNotExist(err) {
+			// "Can't find source path" if the file is missing or
+			// inaccessible.  Check err != nil (not just IsNotExist) so
+			// we also catch permission-denied and other stat failures.
+			if _, err := os.Stat(args[i+1]); err != nil {
 				return nil, fmt.Errorf("--lock-file path does not exist: %s (create it first; bwrap will not)", args[i+1])
 			}
 			cfg.LockFile = args[i+1]
@@ -506,32 +509,16 @@ func (cfg *Config) resolveAgentDefaults() error {
 	return nil
 }
 
-// realpath resolves a path to its canonical absolute form.
+// realpath resolves a path to its canonical absolute form, following all
+// symlinks.  Equivalent to `readlink -f` / `cd "$dir" && pwd -P` in bash.
 func realpath(p string) string {
-	abs, err := os.Readlink(p)
+	abs, err := filepath.Abs(p)
 	if err != nil {
-		// Not a symlink; try to make it absolute.
-		if a, err2 := absPath(p); err2 == nil {
-			return a
-		}
 		return p
 	}
-	// Follow symlinks fully.
-	resolved, err := os.Readlink(abs)
+	resolved, err := filepath.EvalSymlinks(abs)
 	if err != nil {
 		return abs
 	}
 	return resolved
-}
-
-// absPath returns the absolute path, resolving ".." etc.
-func absPath(p string) (string, error) {
-	if strings.HasPrefix(p, "/") {
-		return p, nil
-	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return "", err
-	}
-	return cwd + "/" + p, nil
 }
